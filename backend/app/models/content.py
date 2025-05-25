@@ -1,4 +1,4 @@
-# backend/app/models/content.py
+# backend/app/models/content.py - Updated with Cosmos DB integration
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -9,9 +9,11 @@ import uuid
 class ContentStatus(str, Enum):
     DRAFT = "draft"
     GENERATING = "generating"
+    GENERATED = "generated"  # Added to match your system
     APPROVED = "approved"
     PUBLISHED = "published"
     NEEDS_REVISION = "needs_revision"
+    REJECTED = "rejected"  # Added for review workflow
 
 
 class ComponentType(str, Enum):
@@ -57,20 +59,26 @@ class MasterContext(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "core_concepts": ["slope", "y-intercept", "linear relationship"],
+                "core_concepts": [
+                    "The structure and components of the slope-intercept form (y = mx + b).",
+                    "Understanding 'm' as the slope, representing the rate of change and steepness of the line (rise over run).",
+                    "Understanding 'b' as the y-intercept, representing the point where the line crosses the y-axis (the starting value when x=0)."
+                ],
                 "key_terminology": {
-                    "slope": "rate of change between two points",
-                    "y-intercept": "point where line crosses y-axis"
+                    "Linear Equation": "An equation whose graph is a straight line.",
+                    "Slope-Intercept Form": "A specific way to write linear equations, y = mx + b",
+                    "Slope": "A measure of the steepness and direction of a line",
+                    "Y-intercept": "The point where a line crosses the y-axis"
                 },
                 "learning_objectives": [
-                    "Calculate slope from two points",
-                    "Identify y-intercept from equation"
+                    "Students will be able to identify the slope and y-intercept directly from a linear equation written in slope-intercept form.",
+                    "Students will be able to graph a linear equation given in slope-intercept form by accurately plotting the y-intercept and using the slope to find additional points."
                 ],
                 "difficulty_level": "intermediate",
                 "prerequisites": ["basic_algebra", "coordinate_plane"],
                 "real_world_applications": [
-                    "Calculating speed from distance graphs",
-                    "Business cost analysis"
+                    "Modeling costs: Calculating the total cost of a service (e.g., cell phone plan, taxi fare) that includes a fixed initial fee (y-intercept) and a per-unit charge (slope).",
+                    "Distance-time relationships: Representing constant speed (slope) and an initial starting position (y-intercept) in movement problems."
                 ]
             }
         }
@@ -101,10 +109,12 @@ class ContentComponent(BaseModel):
                         {
                             "heading": "What is Slope?",
                             "content": "Slope represents the rate of change...",
-                            "key_terms_used": ["slope", "rate of change"]
+                            "key_terms_used": ["slope", "rate of change"],
+                            "concepts_covered": ["slope definition"]
                         }
                     ],
-                    "word_count": 1200
+                    "word_count": 1200,
+                    "reading_level": "Intermediate"
                 },
                 "metadata": {
                     "word_count": 1200,
@@ -117,7 +127,7 @@ class ContentComponent(BaseModel):
 
 class GenerationMetadata(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    generated_by: str = Field(default="gemini-2.0-flash-001")
+    generated_by: str = Field(default="gemini-2.5-flash-preview-05-20")
     generation_time_ms: int = Field(..., description="Generation time in milliseconds")
     coherence_score: float = Field(default=0.0, description="Overall coherence score 0-1")
     validation_passed: bool = Field(default=True)
@@ -131,8 +141,8 @@ class GenerationMetadata(BaseModel):
 
 
 class ContentPackage(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    partition_key: str = Field(..., description="Partition key for Cosmos DB")
+    # Core identification - using your existing structure
+    id: str = Field(..., description="Package ID (e.g., pkg_1748053402)")
     
     # Content identification
     subject: str = Field(..., description="Subject area")
@@ -140,21 +150,27 @@ class ContentPackage(BaseModel):
     skill: str = Field(..., description="Specific skill")
     subskill: str = Field(..., description="Subskill")
     
+    # Master context for coherence - required in your structure
+    master_context: MasterContext = Field(..., description="Master context for coherence")
+    
+    # Content structure - your existing embedded format
+    content: Dict[str, Any] = Field(..., description="Embedded content components")
+    
+    # Generation information - required in your structure
+    generation_metadata: GenerationMetadata = Field(..., description="Generation information")
+    
+    # Cosmos DB specific fields (optional, added during storage)
+    partition_key: Optional[str] = Field(None, description="Partition key for Cosmos DB")
+    document_type: Optional[str] = Field(None, description="Document type identifier")
+    
     # Status and workflow
-    status: ContentStatus = Field(default=ContentStatus.DRAFT)
+    status: ContentStatus = Field(default=ContentStatus.GENERATED)
     created_by: Optional[str] = Field(None, description="Creator ID")
     
-    # Content structure
-    master_context: Optional[MasterContext] = Field(None, description="Master context for coherence")
+    # Component IDs (optional, for complex setups)
     content_ids: Dict[str, str] = Field(default={}, description="IDs of content components")
     
-    # Generation information
-    generation_metadata: Optional[GenerationMetadata] = Field(None, description="Generation information")
-    
-    # Embedded content (simplified storage)
-    content: Dict[str, Any] = Field(default={}, description="Embedded content components")
-    
-    # Review information (simplified)
+    # Review information
     review_status: str = Field(default="pending", description="Review status")
     reviewed_by: Optional[str] = Field(None, description="Reviewer ID")
     reviewed_at: Optional[datetime] = Field(None, description="Review timestamp")
@@ -164,34 +180,105 @@ class ContentPackage(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
+    def __init__(self, **data):
+        # Automatically generate partition_key if not provided
+        if 'partition_key' not in data and 'subject' in data and 'unit' in data:
+            data['partition_key'] = f"{data['subject']}-{data['unit']}"
+        super().__init__(**data)
+    
     class Config:
         schema_extra = {
             "example": {
+                "id": "pkg_1748053402",
                 "subject": "Mathematics",
                 "unit": "Algebra",
                 "skill": "Linear Equations",
                 "subskill": "Slope-Intercept Form",
-                "status": "approved",
+                "status": "generated",
+                "master_context": {
+                    "core_concepts": [
+                        "The structure and components of the slope-intercept form (y = mx + b)"
+                    ],
+                    "key_terminology": {
+                        "Linear Equation": "An equation whose graph is a straight line"
+                    },
+                    "learning_objectives": [
+                        "Students will be able to identify the slope and y-intercept"
+                    ],
+                    "difficulty_level": "intermediate",
+                    "prerequisites": ["basic_algebra"],
+                    "real_world_applications": ["Modeling costs"]
+                },
                 "content": {
                     "reading": {
                         "title": "Understanding Slope-Intercept Form",
-                        "word_count": 1200
+                        "sections": [
+                            {
+                                "heading": "Introduction",
+                                "content": "Linear equations are...",
+                                "key_terms_used": ["Linear Equation"],
+                                "concepts_covered": ["introduction"]
+                            }
+                        ],
+                        "word_count": 1150,
+                        "reading_level": "Intermediate"
                     },
                     "visual": {
-                        "description": "Interactive line graphing tool",
-                        "code_lines": 127
+                        "p5_code": "function setup() { createCanvas(800, 600); }",
+                        "description": "Interactive slope-intercept demonstration",
+                        "interactive_elements": ["slope_slider", "y_intercept_slider"],
+                        "concepts_demonstrated": ["slope", "y-intercept"],
+                        "user_instructions": "Adjust sliders to see effects"
                     },
                     "audio": {
-                        "audio_file_path": "generated_audio/audio_123.wav",
-                        "duration_seconds": 245
+                        "audio_file_path": "generated_audio/audio_pkg_1748053402.wav",
+                        "audio_filename": "audio_pkg_1748053402.wav",
+                        "dialogue_script": "Teacher: Today we'll learn about...",
+                        "duration_seconds": 356.4,
+                        "voice_config": {
+                            "teacher_voice": "Zephyr",
+                            "student_voice": "Puck"
+                        },
+                        "tts_status": "success"
                     },
                     "practice": {
-                        "problem_count": 8,
-                        "estimated_time_minutes": 15
+                        "problems": [
+                            {
+                                "id": "Mathematics_SKILL-01_SUBSKILL-01-A_timestamp_uuid",
+                                "problem_data": {
+                                    "problem_type": "Multiple Choice",
+                                    "problem": "What is the slope of y = 2x + 3?",
+                                    "answer": "2",
+                                    "success_criteria": ["Identify slope coefficient"],
+                                    "teaching_note": "Slope is coefficient of x",
+                                    "metadata": {
+                                        "subject": "Mathematics",
+                                        "unit": {"id": "ALGEBRA001", "title": "Algebra"},
+                                        "skill": {"id": "ALGEBRA001-01", "description": "Linear Equations"},
+                                        "subskill": {"id": "ALGEBRA001-01-A", "description": "Slope-Intercept Form"}
+                                    }
+                                }
+                            }
+                        ],
+                        "problem_count": 9,
+                        "estimated_time_minutes": 18
                     }
+                },
+                "generation_metadata": {
+                    "generation_time_ms": 241507,
+                    "coherence_score": 0.9
                 }
             }
         }
+    
+    @validator('content')
+    def validate_content_structure(cls, v):
+        """Validate that content has required components"""
+        required_components = ['reading', 'visual', 'audio', 'practice']
+        for component in required_components:
+            if component not in v:
+                raise ValueError(f"Content must include {component} component")
+        return v
 
 
 # Generation Progress Tracking
@@ -223,3 +310,102 @@ class BatchGenerationRequest(BaseModel):
         if len(v) == 0:
             raise ValueError("Batch must contain at least 1 request")
         return v
+
+
+# Storage Metadata (added during Cosmos DB operations)
+class StorageMetadata(BaseModel):
+    created_at: str = Field(..., description="ISO timestamp when stored")
+    updated_at: str = Field(..., description="ISO timestamp when last updated")
+    version: int = Field(default=1, description="Document version number")
+    content_hash: str = Field(..., description="SHA256 hash of content for integrity")
+
+
+# Review Queue Entry (for educator workflow)
+class ReviewQueueEntry(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    package_id: str = Field(..., description="Content package ID to review")
+    educator_id: str = Field(..., description="Assigned educator ID")
+    assigned_at: datetime = Field(default_factory=datetime.utcnow)
+    priority: str = Field(default="medium", description="Review priority")
+    estimated_review_time: int = Field(default=15, description="Estimated minutes to review")
+    review_type: str = Field(default="initial", description="Type of review")
+    due_date: Optional[datetime] = Field(None, description="Review due date")
+    status: str = Field(default="assigned", description="Review status")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "package_id": "pkg_1748053402",
+                "educator_id": "educator_123",
+                "priority": "high",
+                "estimated_review_time": 20,
+                "review_type": "initial"
+            }
+        }# backend/app/models/content.py - Updated to match your exact structure
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Union
+from datetime import datetime
+from enum import Enum
+
+
+class MasterContext(BaseModel):
+    """Master context that ensures coherence across all content types"""
+    core_concepts: List[str]
+    key_terminology: Dict[str, str]
+    learning_objectives: List[str]
+    difficulty_level: str
+    prerequisites: List[str]
+    real_world_applications: List[str]
+
+
+class GenerationMetadata(BaseModel):
+    """Metadata about the content generation process"""
+    generation_time_ms: int
+    coherence_score: float
+
+
+class ContentPackage(BaseModel):
+    """Complete educational content package matching your exact structure"""
+    id: str
+    subject: str
+    unit: str
+    skill: str
+    subskill: str
+    master_context: MasterContext
+    content: Dict[str, Any]  # Contains reading, visual, audio, practice
+    generation_metadata: GenerationMetadata
+    
+    # Optional fields that might be added during storage
+    partition_key: Optional[str] = None
+    
+    def __init__(self, **data):
+        # Automatically generate partition_key if not provided
+        if 'partition_key' not in data and 'subject' in data and 'unit' in data:
+            data['partition_key'] = f"{data['subject']}-{data['unit']}"
+        super().__init__(**data)
+
+
+class ContentGenerationRequest(BaseModel):
+    """Request for generating educational content"""
+    subject: str
+    unit: str
+    skill: str
+    subskill: str
+    difficulty_level: str = "intermediate"
+    prerequisites: List[str] = []
+
+
+class ComponentType(str, Enum):
+    """Types of content components"""
+    READING = "reading"
+    VISUAL = "visual"
+    AUDIO = "audio"
+    PRACTICE = "practice"
+
+
+class ContentComponent(BaseModel):
+    """Individual content component (for internal use)"""
+    package_id: str
+    component_type: ComponentType
+    content: Dict[str, Any]
+    metadata: Dict[str, Any] = {}
