@@ -163,27 +163,35 @@ class ContentPackage(BaseModel):
     partition_key: Optional[str] = Field(None, description="Partition key for Cosmos DB")
     document_type: Optional[str] = Field(None, description="Document type identifier")
     
-    # Status and workflow
-    status: ContentStatus = Field(default=ContentStatus.GENERATED)
+    # Status and workflow - FIXED: Using string instead of enum for compatibility
+    status: str = Field(default="generated", description="Package status")
     created_by: Optional[str] = Field(None, description="Creator ID")
     
     # Component IDs (optional, for complex setups)
     content_ids: Dict[str, str] = Field(default={}, description="IDs of content components")
     
-    # Review information
+    # Review information - FIXED: review_notes as List[Dict] to match API usage
     review_status: str = Field(default="pending", description="Review status")
     reviewed_by: Optional[str] = Field(None, description="Reviewer ID")
-    reviewed_at: Optional[datetime] = Field(None, description="Review timestamp")
-    review_notes: List[str] = Field(default=[], description="Review feedback")
+    reviewed_at: Optional[str] = Field(None, description="Review timestamp as ISO string")
+    review_notes: List[Dict[str, Any]] = Field(default=[], description="Review feedback as objects")
     
-    # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # Timestamps - FIXED: Using Optional[str] for better serialization
+    created_at: Optional[str] = Field(None, description="Creation timestamp as ISO string")
+    updated_at: Optional[str] = Field(None, description="Last update timestamp as ISO string")
     
     def __init__(self, **data):
         # Automatically generate partition_key if not provided
         if 'partition_key' not in data and 'subject' in data and 'unit' in data:
             data['partition_key'] = f"{data['subject']}-{data['unit']}"
+        
+        # Set timestamps if not provided
+        current_time = datetime.utcnow().isoformat()
+        if 'created_at' not in data or data['created_at'] is None:
+            data['created_at'] = current_time
+        if 'updated_at' not in data or data['updated_at'] is None:
+            data['updated_at'] = current_time
+            
         super().__init__(**data)
     
     class Config:
@@ -267,7 +275,15 @@ class ContentPackage(BaseModel):
                 "generation_metadata": {
                     "generation_time_ms": 241507,
                     "coherence_score": 0.9
-                }
+                },
+                "review_notes": [
+                    {
+                        "note": "Content looks good overall",
+                        "status": "approved", 
+                        "timestamp": "2025-05-27T12:00:00Z",
+                        "reviewer_id": "educator_123"
+                    }
+                ]
             }
         }
     

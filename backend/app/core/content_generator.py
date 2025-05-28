@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
+
+
 from google import genai
 
 from google.genai import types
@@ -31,7 +33,16 @@ from app.models.content import (
     GenerationMetadata
 )
 
+# Import your existing services
+from app.database.cosmos_client import cosmos_service
+from app.database.blob_storage import blob_storage_service
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+logging.getLogger('azure').setLevel(logging.WARNING)  # or logging.ERROR for even less output
+logging.getLogger('azure.cosmos').setLevel(logging.INFO)  # Specifically for Cosmos DB
+logging.getLogger('urllib3').setLevel(logging.WARNING)  # For HTTP request logs
 
 
 class ContentGenerationService:
@@ -40,19 +51,20 @@ class ContentGenerationService:
     def __init__(self):
         self.client = None
         self.types = types
+        self.cosmos_service = cosmos_service
+        self.blob_service = blob_storage_service
         self._initialize_gemini()
     
     def _initialize_gemini(self):
-        """Initialize Gemini client"""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is required")
+        """Initialize Gemini client with configuration"""
+        if not settings.GEMINI_API_KEY:
+            raise ValueError(f"GEMINI_API_KEY is required. Please check your configuration in {settings.ENVIRONMENT} mode.")
         
-        self.client = genai.Client(api_key=api_key)
-        logger.info("Gemini client initialized successfully")
+        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        logger.info(f"Gemini client initialized successfully (Environment: {settings.ENVIRONMENT})")
     
     async def generate_content_package(self, request: ContentGenerationRequest) -> ContentPackage:
-        """Generate complete educational content package"""
+        """Generate complete educational content package and store it"""
         
         start_time = datetime.now()
         package_id = f"pkg_{int(start_time.timestamp())}"
@@ -60,24 +72,20 @@ class ContentGenerationService:
         try:
             logger.info(f"Starting content generation for {request.subject}/{request.skill}")
             
-            # Stage 1: Generate Master Context
+            # EXISTING GENERATION LOGIC (unchanged)
             master_context = await self._generate_master_context(request)
             
-            # Stage 2: Generate content components in parallel (where possible)
             reading_task = self._generate_reading_content(request, master_context, package_id)
             visual_task = self._generate_visual_demo(request, master_context, package_id)
             audio_script_task = self._generate_audio_script(request, master_context)
             
-            # Wait for parallel tasks
             reading_comp, visual_comp, audio_script = await asyncio.gather(
                 reading_task, visual_task, audio_script_task
             )
             
-            # Stage 3: Sequential tasks that depend on others
-            # Convert audio script to WAV
-            audio_comp = await self._generate_audio_from_script(audio_script, package_id)
+            # Generate audio and upload to blob storage
+            audio_comp = await self._generate_and_store_audio(audio_script, package_id)
             
-            # Generate practice problems (can use context from reading/visual)
             practice_comp = await self._generate_practice_problems(
                 request, master_context, reading_comp, visual_comp, package_id
             )
@@ -96,22 +104,190 @@ class ContentGenerationService:
                 content={
                     "reading": reading_comp.content,
                     "visual": visual_comp.content,
-                    "audio": audio_comp.content,
+                    "audio": audio_comp.content,  # Now contains blob URLs
                     "practice": practice_comp.content
                 },
                 generation_metadata=GenerationMetadata(
                     generation_time_ms=generation_time,
-                    coherence_score=0.90  # Built-in coherence via shared context
+                    coherence_score=0.90
                 )
             )
             
-            logger.info(f"Content generation completed in {generation_time}ms")
-            return package
+            # STORE IN COSMOS DB
+            stored_package = await self.cosmos_service.create_content_package(package)
+            
+            logger.info(f"Content generation and storage completed in {generation_time}ms")
+            return stored_package
             
         except Exception as e:
             logger.error(f"Content generation failed: {str(e)}")
+            # Cleanup any uploaded files on failure
+            await self._cleanup_on_failure(package_id)
             raise
-    
+
+    async def _generate_and_store_audio(self, script: str, package_id: str) -> ContentComponent:
+        """Generate audio and upload to blob storage - SIMPLIFIED"""
+        
+        # Create temporary audio file (existing TTS logic)
+        audio_dir = Path("generated_audio")
+        audio_dir.mkdir(exist_ok=True)
+        
+        logger.info(f"Generating audio for package: {package_id}")
+        
+        try:
+            # EXISTING TTS GENERATION (unchanged)
+            response = await self.client.aio.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=script,
+                config=GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=SpeechConfig(
+                        multi_speaker_voice_config=MultiSpeakerVoiceConfig(
+                            speaker_voice_configs=[
+                                SpeakerVoiceConfig(
+                                    speaker="Teacher",
+                                    voice_config=VoiceConfig(
+                                        prebuilt_voice_config=PrebuiltVoiceConfig(
+                                            voice_name="Zephyr"
+                                        )
+                                    )
+                                ),
+                                SpeakerVoiceConfig(
+                                    speaker="Student",
+                                    voice_config=VoiceConfig(
+                                        prebuilt_voice_config=PrebuiltVoiceConfig(
+                                            voice_name="Puck"
+                                        )
+                                    )
+                                )
+                            ]
+                        )
+                    ),
+                    temperature=0.3
+                )
+            )
+            
+            # Extract audio data
+            audio_data = bytearray()
+            if not (hasattr(response, 'candidates') and response.candidates):
+                raise ValueError("TTS response has no candidates")
+            
+            candidate = response.candidates[0]
+            if not (hasattr(candidate, 'content') and candidate.content):
+                raise ValueError("TTS response candidate has no content")
+            
+            if not (hasattr(candidate.content, 'parts') and candidate.content.parts):
+                raise ValueError("TTS response content has no parts")
+            
+            for part in candidate.content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    audio_data.extend(part.inline_data.data)
+            
+            if len(audio_data) == 0:
+                raise ValueError("No audio data found in TTS response")
+            
+            # Save temporary file
+            audio_filename = f"audio_{package_id}.wav"
+            temp_audio_path = audio_dir / audio_filename
+            
+            with open(temp_audio_path, 'wb') as f:
+                f.write(audio_data)
+            
+            # UPLOAD TO BLOB STORAGE
+            logger.info(f"Uploading audio to blob storage: {audio_filename}")
+            upload_result = await self.blob_service.upload_audio_file(
+                package_id=package_id,
+                file_path=str(temp_audio_path),
+                filename=audio_filename,
+                overwrite=True
+            )
+            
+            if not upload_result["success"]:
+                raise RuntimeError(f"Failed to upload audio: {upload_result['error']}")
+            
+            # Calculate duration
+            word_count = len(script.split())
+            estimated_duration = (word_count / 150) * 60
+            
+            logger.info(f"Audio uploaded successfully: {upload_result['blob_url']}")
+            
+            return ContentComponent(
+                package_id=package_id,
+                component_type=ComponentType.AUDIO,
+                content={
+                    "audio_blob_url": upload_result["blob_url"],  # BLOB URL instead of file path
+                    "audio_filename": audio_filename,
+                    "dialogue_script": script,
+                    "duration_seconds": estimated_duration,
+                    "voice_config": {
+                        "teacher_voice": "Zephyr",
+                        "student_voice": "Puck"
+                    },
+                    "tts_status": "success",
+                    "blob_name": upload_result["blob_name"]  # For cleanup if needed
+                },
+                metadata={
+                    "duration_seconds": estimated_duration,
+                    "file_size_bytes": len(audio_data),
+                    "script_word_count": word_count,
+                    "audio_format": "wav",
+                    "tts_success": True,
+                    "stored_in_blob": True  # Add this flag
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Audio generation and storage failed: {str(e)}")
+            raise RuntimeError(f"Audio generation failed for package {package_id}: {str(e)}") from e
+
+    async def _cleanup_on_failure(self, package_id: str):
+        """Clean up any uploaded files if generation fails"""
+        try:
+            logger.info(f"Cleaning up failed package: {package_id}")
+            cleanup_result = await self.blob_service.cleanup_package_audio(package_id)
+            if cleanup_result["success"]:
+                logger.info(f"Cleaned up {cleanup_result['deleted_count']} audio files")
+            else:
+                logger.warning(f"Cleanup had errors: {cleanup_result.get('errors', [])}")
+        except Exception as e:
+            logger.warning(f"Cleanup failed (non-critical): {str(e)}")
+
+    async def get_content_package(self, package_id: str, subject: str, unit: str) -> ContentPackage:
+        """Retrieve a content package from storage"""
+        partition_key = f"{subject}-{unit}"
+        package = await self.cosmos_service.get_content_package(package_id, partition_key)
+        if not package:
+            raise ValueError(f"Content package {package_id} not found")
+        return package
+
+    async def list_content_packages(self, subject: str = None, unit: str = None) -> list[ContentPackage]:
+        """List content packages with optional filtering"""
+        return await self.cosmos_service.list_content_packages(
+            subject=subject,
+            unit=unit,
+            limit=100
+        )
+
+    async def delete_content_package(self, package_id: str, subject: str, unit: str) -> bool:
+        """Delete a content package and clean up associated files"""
+        partition_key = f"{subject}-{unit}"
+        
+        try:
+            # Delete from Cosmos DB
+            deleted = await self.cosmos_service.delete_content_package(package_id, partition_key)
+            if not deleted:
+                return False
+            
+            # Clean up blob storage
+            cleanup_result = await self.blob_service.cleanup_package_audio(package_id)
+            logger.info(f"Cleaned up {cleanup_result.get('deleted_count', 0)} audio files")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to delete package {package_id}: {str(e)}")
+            return False
+
     async def _generate_master_context(self, request: ContentGenerationRequest) -> MasterContext:
         """Generate foundational context for all content"""
         
@@ -151,7 +327,7 @@ class ContentGenerationService:
                 config=self.types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.3,
-                    max_output_tokens=8096
+                    max_output_tokens=25000
                 )
             )
             
@@ -223,7 +399,7 @@ class ContentGenerationService:
                 config=self.types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.4,
-                    max_output_tokens=8096
+                    max_output_tokens=25000
                 )
             )
             
@@ -283,7 +459,7 @@ class ContentGenerationService:
                 config=self.types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.5,
-                    max_output_tokens=16384
+                    max_output_tokens=25000
                 )
             )
             
@@ -340,7 +516,7 @@ class ContentGenerationService:
                 contents=prompt,
                 config=self.types.GenerateContentConfig(
                     temperature=0.6,
-                    max_output_tokens=16384
+                    max_output_tokens=25000
                 )
             )
             
@@ -563,7 +739,7 @@ class ContentGenerationService:
                 config=self.types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.5,
-                    max_output_tokens=8096
+                    max_output_tokens=16000
                 )
             )
             
