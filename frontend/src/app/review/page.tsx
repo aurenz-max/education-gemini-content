@@ -1,4 +1,4 @@
-// src/app/review/page.tsx - Review Dashboard
+// src/app/review/page.tsx - Fixed Review Dashboard
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ContentPackage } from '@/lib/types';
-import { contentAPI } from '@/lib/api';
+import { useContent } from '@/lib/context';
 import { 
   Loader2, 
   Search, 
@@ -19,20 +19,29 @@ import {
   CheckCircle, 
   XCircle, 
   AlertCircle,
-  RefreshCw 
+  RefreshCw,
+  ArrowLeft
 } from 'lucide-react';
+
+const STATUS_OPTIONS = [
+  { value: 'all', label: 'All Status' },
+  { value: 'generated', label: 'Pending Review' },
+  { value: 'under_review', label: 'Under Review' },
+  { value: 'needs_revision', label: 'Needs Revision' },
+  { value: 'approved', label: 'Approved' },
+  { value: 'rejected', label: 'Rejected' }
+];
 
 export default function ReviewDashboard() {
   const router = useRouter();
-  const [packages, setPackages] = useState<ContentPackage[]>([]);
-  const [filteredPackages, setFilteredPackages] = useState<ContentPackage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { packages, loading, error, refreshPackages } = useContent();
   
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
   const [subjectFilter, setSubjectFilter] = useState<string>('all');
   const [unitFilter, setUnitFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('generated'); // Default to pending review
+  const [sortBy, setSortBy] = useState('newest');
   
   // Get unique subjects and units for filter options - safely calculated
   const subjects = useMemo(() => {
@@ -50,46 +59,19 @@ export default function ReviewDashboard() {
   }, [packages, subjectFilter]);
 
   const loadPackages = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const reviewQueue = await contentAPI.getReviewQueue({ limit: 100 });
-      setPackages(reviewQueue);
-      setFilteredPackages(reviewQueue);
-      
-    } catch (err) {
-      console.error('Failed to load review queue:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load packages');
-    } finally {
-      setLoading(false);
-    }
+    await refreshPackages();
   };
 
   useEffect(() => {
-    loadPackages();
-  }, []);
+    refreshPackages();
+  }, [refreshPackages]);
 
-  // Apply filters
-  useEffect(() => {
-    if (!Array.isArray(packages)) {
-      setFilteredPackages([]);
-      return;
-    }
+  // Filter and sort packages - similar to library page
+  const filteredPackages = useMemo(() => {
+    // Ensure packages is always an array
+    let filtered = Array.isArray(packages) ? [...packages] : [];
 
-    let filtered = [...packages]; // Create a copy
-
-    // Apply subject filter
-    if (subjectFilter !== 'all') {
-      filtered = filtered.filter(pkg => pkg.subject === subjectFilter);
-    }
-
-    // Apply unit filter
-    if (unitFilter !== 'all') {
-      filtered = filtered.filter(pkg => pkg.unit === unitFilter);
-    }
-
-    // Apply search filter
+    // Search filter
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(pkg => 
@@ -100,8 +82,57 @@ export default function ReviewDashboard() {
       );
     }
 
-    setFilteredPackages(filtered);
-  }, [packages, searchTerm, subjectFilter, unitFilter]);
+    // Subject filter
+    if (subjectFilter !== 'all') {
+      filtered = filtered.filter(pkg => pkg.subject === subjectFilter);
+    }
+
+    // Unit filter
+    if (unitFilter !== 'all') {
+      filtered = filtered.filter(pkg => pkg.unit === unitFilter);
+    }
+
+    // Status filter
+    if (statusFilter !== 'all') {
+      filtered = filtered.filter(pkg => (pkg.status || 'generated') === statusFilter);
+    }
+
+    // Sort
+    filtered.sort((a, b) => {
+      switch (sortBy) {
+        case 'newest':
+          return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+        case 'oldest':
+          return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+        case 'subject':
+          return a.subject.localeCompare(b.subject);
+        case 'priority':
+          // Prioritize packages that need review
+          const statusPriority = { 'generated': 0, 'needs_revision': 1, 'under_review': 2, 'approved': 3, 'rejected': 4 };
+          const aStatus = a.status || 'generated';
+          const bStatus = b.status || 'generated';
+          return (statusPriority[aStatus] || 0) - (statusPriority[bStatus] || 0);
+        default:
+          return 0;
+      }
+    });
+
+    return filtered;
+  }, [packages, searchTerm, subjectFilter, unitFilter, statusFilter, sortBy]);
+
+  // Statistics - similar to library page
+  const stats = useMemo(() => {
+    const safePackages = Array.isArray(packages) ? packages : [];
+    const total = safePackages.length;
+    
+    const pendingReview = safePackages.filter(p => (p.status || 'generated') === 'generated').length;
+    const approved = safePackages.filter(p => p.status === 'approved').length;
+    const needsRevision = safePackages.filter(p => p.status === 'needs_revision').length;
+    const rejected = safePackages.filter(p => p.status === 'rejected').length;
+    const underReview = safePackages.filter(p => p.status === 'under_review').length;
+
+    return { total, pendingReview, approved, needsRevision, rejected, underReview };
+  }, [packages]);
 
   const getStatusIcon = (status?: string) => {
     switch (status) {
@@ -165,6 +196,14 @@ export default function ReviewDashboard() {
     router.push(`/review/${pkg.id}?${params.toString()}`);
   };
 
+  const clearFilters = () => {
+    setSearchTerm('');
+    setSubjectFilter('all');
+    setUnitFilter('all');
+    setStatusFilter('generated');
+    setSortBy('newest');
+  };
+
   if (loading) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -182,96 +221,123 @@ export default function ReviewDashboard() {
     <div className="container mx-auto p-6 min-h-screen bg-gray-50">
       {/* Header */}
       <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-4 mb-4">
+          <Button 
+            variant="outline" 
+            onClick={() => router.push('/')}
+            className="flex items-center gap-2"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to Home
+          </Button>
+        </div>
+        
+        <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Review Dashboard</h1>
-            <p className="text-muted-foreground text-lg">
+            <h1 className="text-4xl font-bold tracking-tight">Review Dashboard</h1>
+            <p className="text-xl text-muted-foreground mt-2">
               Review and approve generated content packages
             </p>
           </div>
-          <Button onClick={loadPackages} variant="outline">
-            <RefreshCw className="mr-2 h-4 w-4" />
+          
+          <Button
+            variant="outline"
+            onClick={() => refreshPackages()}
+            disabled={loading}
+            className="flex items-center gap-2"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
         </div>
+      </div>
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2">
-                <Clock className="h-5 w-5 text-blue-600" />
-                <div>
-                  <p className="text-2xl font-bold">{filteredPackages.length}</p>
-                  <p className="text-sm text-muted-foreground">Awaiting Review</p>
-                </div>
+      {/* Statistics Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-muted-foreground">Pending Review</p>
+                <p className="text-2xl font-bold">{stats.pendingReview}</p>
               </div>
-            </CardContent>
-          </Card>
-          
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2">
-                <CheckCircle className="h-5 w-5 text-green-600" />
-                <div>
-                  <p className="text-2xl font-bold">
-                    {Array.isArray(packages) ? packages.filter(p => p.status === 'approved').length : 0}
-                  </p>
-                  <p className="text-sm text-muted-foreground">Approved</p>
-                </div>
+              <Clock className="h-8 w-8 text-orange-600" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-muted-foreground">Under Review</p>
+                <p className="text-2xl font-bold">{stats.underReview}</p>
               </div>
-            </CardContent>
-          </Card>
-          
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-yellow-600" />
-                <div>
-                  <p className="text-2xl font-bold">
-                    {Array.isArray(packages) ? packages.filter(p => p.status === 'needs_revision').length : 0}
-                  </p>
-                  <p className="text-sm text-muted-foreground">Need Changes</p>
-                </div>
+              <Clock className="h-8 w-8 text-blue-600" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-muted-foreground">Approved</p>
+                <p className="text-2xl font-bold">{stats.approved}</p>
               </div>
-            </CardContent>
-          </Card>
-          
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2">
-                <XCircle className="h-5 w-5 text-red-600" />
-                <div>
-                  <p className="text-2xl font-bold">
-                    {Array.isArray(packages) ? packages.filter(p => p.status === 'rejected').length : 0}
-                  </p>
-                  <p className="text-sm text-muted-foreground">Rejected</p>
-                </div>
+              <CheckCircle className="h-8 w-8 text-green-600" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-muted-foreground">Need Changes</p>
+                <p className="text-2xl font-bold">{stats.needsRevision}</p>
               </div>
-            </CardContent>
-          </Card>
-        </div>
+              <AlertCircle className="h-8 w-8 text-yellow-600" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-muted-foreground">Rejected</p>
+                <p className="text-2xl font-bold">{stats.rejected}</p>
+              </div>
+              <XCircle className="h-8 w-8 text-red-600" />
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Filters */}
-      <Card className="mb-6">
-        <CardContent className="p-4">
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="flex-1">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  placeholder="Search by skill, subject, or unit..."
-                  className="pl-10"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
+      <Card className="mb-8">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Filter className="h-5 w-5" />
+            Filter & Search
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search skills, subjects..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-10"
+              />
             </div>
             
             <Select value={subjectFilter} onValueChange={setSubjectFilter}>
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="Filter by Subject" />
+              <SelectTrigger>
+                <SelectValue placeholder="All Subjects" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Subjects</SelectItem>
@@ -282,8 +348,8 @@ export default function ReviewDashboard() {
             </Select>
             
             <Select value={unitFilter} onValueChange={setUnitFilter}>
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="Filter by Unit" />
+              <SelectTrigger>
+                <SelectValue placeholder="All Units" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Units</SelectItem>
@@ -292,88 +358,153 @@ export default function ReviewDashboard() {
                 ))}
               </SelectContent>
             </Select>
+            
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger>
+                <SelectValue placeholder="Filter by Status" />
+              </SelectTrigger>
+              <SelectContent>
+                {STATUS_OPTIONS.map(option => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            
+            <Select value={sortBy} onValueChange={setSortBy}>
+              <SelectTrigger>
+                <SelectValue placeholder="Sort by" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="priority">By Priority</SelectItem>
+                <SelectItem value="newest">Newest First</SelectItem>
+                <SelectItem value="oldest">Oldest First</SelectItem>
+                <SelectItem value="subject">By Subject</SelectItem>
+              </SelectContent>
+            </Select>
+            
+            <Button variant="outline" onClick={clearFilters}>
+              Clear Filters
+            </Button>
           </div>
+          
+          {/* Active Filters */}
+          {(searchTerm || subjectFilter !== 'all' || unitFilter !== 'all' || statusFilter !== 'generated') && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <span className="text-sm text-muted-foreground">Active filters:</span>
+              {searchTerm && (
+                <Badge variant="secondary">
+                  Search: "{searchTerm}"
+                </Badge>
+              )}
+              {subjectFilter !== 'all' && (
+                <Badge variant="secondary">
+                  Subject: {subjectFilter}
+                </Badge>
+              )}
+              {unitFilter !== 'all' && (
+                <Badge variant="secondary">
+                  Unit: {unitFilter}
+                </Badge>
+              )}
+              {statusFilter !== 'generated' && (
+                <Badge variant="secondary">
+                  Status: {STATUS_OPTIONS.find(s => s.value === statusFilter)?.label}
+                </Badge>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* Error State */}
+      {/* Error Display */}
       {error && (
-        <Card className="mb-6 border-red-200 bg-red-50">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 text-red-800">
-              <AlertCircle className="h-5 w-5" />
-              <p>{error}</p>
-              <Button onClick={loadPackages} size="sm" variant="outline" className="ml-auto">
-                Retry
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="mb-6">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <h3 className="font-medium text-red-800">Error Loading Review Queue</h3>
+            <p className="text-sm text-red-600 mt-1">{error}</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={loadPackages}>
+              Try Again
+            </Button>
+          </div>
+        </div>
       )}
 
       {/* Package Cards */}
       {filteredPackages.length === 0 ? (
-        <Card>
-          <CardContent className="p-12 text-center">
-            <div className="text-muted-foreground">
-              <Clock className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <h3 className="text-lg font-medium mb-2">No packages to review</h3>
-              <p>All caught up! Check back later for new content to review.</p>
-            </div>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredPackages.map((pkg) => (
-            <Card key={pkg.id} className="hover:shadow-lg transition-shadow">
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <CardTitle className="text-lg leading-tight mb-1">
-                      {pkg.skill}
-                    </CardTitle>
-                    <p className="text-sm text-muted-foreground truncate">
-                      {pkg.subskill}
-                    </p>
-                  </div>
-                  {getStatusIcon(pkg.status)}
-                </div>
-              </CardHeader>
-              
-              <CardContent className="pt-0">
-                <div className="space-y-3">
-                  <div className="text-sm">
-                    <p className="font-medium text-blue-700">{pkg.subject}</p>
-                    <p className="text-muted-foreground">{pkg.unit}</p>
-                  </div>
-                  
-                  <div className="flex items-center justify-between">
-                    {getStatusBadge(pkg.status)}
-                    <span className="text-xs text-muted-foreground">
-                      {formatDate(pkg.created_at)}
-                    </span>
-                  </div>
-                  
-                  {pkg.generation_metadata && (
-                    <div className="text-xs text-muted-foreground">
-                      Quality: {Math.round((pkg.generation_metadata.coherence_score || 0) * 100)}%
-                    </div>
-                  )}
-                  
-                  <div className="flex gap-2 pt-2">
-                    <Button 
-                      onClick={() => handleReviewPackage(pkg)}
-                      className="flex-1"
-                    >
-                      <Eye className="mr-2 h-4 w-4" />
-                      Review
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+        <div className="text-center py-12">
+          <div className="mx-auto w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+            <Clock className="h-12 w-12 text-gray-400" />
+          </div>
+          <h3 className="text-lg font-medium mb-2">
+            {packages.length === 0 ? 'No packages to review' : 'No packages match your filters'}
+          </h3>
+          <p className="text-muted-foreground mb-6">
+            {packages.length === 0 
+              ? 'All caught up! Check back later for new content to review.'
+              : 'Try adjusting your search terms or filters.'
+            }
+          </p>
         </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm text-muted-foreground">
+              Showing {filteredPackages.length} of {packages.length} packages
+            </p>
+          </div>
+          
+          <div className="space-y-2">
+            {filteredPackages.map((pkg) => (
+              <Card key={pkg.id} className="hover:shadow-sm transition-shadow">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    {/* Left side - Content info */}
+                    <div className="flex items-center space-x-4 flex-1">
+                      <div className="flex items-center space-x-2">
+                        {getStatusIcon(pkg.status)}
+                        {getStatusBadge(pkg.status)}
+                      </div>
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-2">
+                          <h3 className="font-semibold text-lg truncate">{pkg.skill}</h3>
+                          <span className="text-sm text-muted-foreground">•</span>
+                          <p className="text-sm text-muted-foreground truncate">{pkg.subskill}</p>
+                        </div>
+                        <div className="flex items-center space-x-4 mt-1">
+                          <span className="text-sm font-medium text-blue-700">{pkg.subject}</span>
+                          <span className="text-sm text-muted-foreground">{pkg.unit}</span>
+                          {pkg.generation_metadata && (
+                            <span className="text-xs text-muted-foreground">
+                              Quality: {Math.round((pkg.generation_metadata.coherence_score || 0) * 100)}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Right side - Actions and date */}
+                    <div className="flex items-center space-x-4">
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">
+                        {formatDate(pkg.created_at)}
+                      </span>
+                      <Button 
+                        onClick={() => handleReviewPackage(pkg)}
+                        size="sm"
+                        className="whitespace-nowrap"
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        Review
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

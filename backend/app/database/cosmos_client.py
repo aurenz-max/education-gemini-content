@@ -100,7 +100,7 @@ class CosmosDBService:
         return hashlib.sha256(content_str.encode()).hexdigest()
     
     def _add_storage_metadata(self, document: Dict[str, Any], is_update: bool = False) -> Dict[str, Any]:
-        """Add storage metadata to document"""
+        """Add storage metadata to document - UPDATED with revision support"""
         now = datetime.now(timezone.utc).isoformat()
         
         if not is_update:
@@ -108,7 +108,8 @@ class CosmosDBService:
                 "created_at": now,
                 "updated_at": now,
                 "version": 1,
-                "content_hash": self._generate_content_hash(document.get("content", {}))
+                "content_hash": self._generate_content_hash(document.get("content", {})),
+                "revision_history": []  # Initialize empty revision history
             }
         else:
             # Update existing metadata
@@ -118,6 +119,13 @@ class CosmosDBService:
             document["storage_metadata"]["updated_at"] = now
             document["storage_metadata"]["version"] = document["storage_metadata"].get("version", 1) + 1
             document["storage_metadata"]["content_hash"] = self._generate_content_hash(document.get("content", {}))
+            
+            # Preserve revision history from document level or initialize if missing
+            if "revision_history" in document:
+                # Move revision history from document level to storage_metadata if needed
+                document["storage_metadata"]["revision_history"] = document.get("revision_history", [])
+            elif "revision_history" not in document["storage_metadata"]:
+                document["storage_metadata"]["revision_history"] = []
         
         return document
     
@@ -127,7 +135,7 @@ class CosmosDBService:
         
         try:
             # Convert to dict and add metadata - preserve exact structure
-            document = package.model_dump()
+            document = package.model_dump(mode='json')
             
             # Don't add partition_key to document if it doesn't exist in original
             if "partition_key" not in document:
@@ -190,7 +198,7 @@ class CosmosDBService:
         
         try:
             # Convert to dict and update metadata
-            document = package.model_dump()
+            document = package.model_dump(mode='json')
             document = self._add_storage_metadata(document, is_update=True)
             
             logger.info(f"Updating content package: {package.id}")

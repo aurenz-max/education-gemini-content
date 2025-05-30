@@ -1,64 +1,76 @@
-// src/app/generate/page.tsx
+// src/app/generate/page.tsx - Updated with Enhanced Generation
 'use client';
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ContentGenerationForm } from '@/components/ContentGenerationForm';
 import { GenerationProgress } from '@/components/GenerationProgress';
-import { useContent } from '@/lib/context';
-import { GenerationRequest } from '@/lib/types';
+import { EnhancedContentGenerationRequest } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, Home } from 'lucide-react';
+import { contentAPI } from '@/lib/api';
+import dynamic from 'next/dynamic';
+
+// Dynamically import the enhanced form to avoid SSR issues with complex state
+const EnhancedContentGenerationForm = dynamic(
+  () => import('@/components/ContentGenerationForm'),
+  { ssr: false }
+);
 
 export default function GeneratePage() {
   const router = useRouter();
-  const { generateContent, error, clearError } = useContent();
   const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [currentGeneration, setCurrentGeneration] = useState<{
     packageId: string;
     subject: string;
     unit: string;
     skill: string;
     subskill: string;
+    grade?: string;
   } | null>(null);
 
-  const handleGenerateContent = async (request: GenerationRequest) => {
+  const handleGenerateContent = async (request: EnhancedContentGenerationRequest) => {
     try {
       setIsGenerating(true);
-      clearError();
+      setError(null);
       
-      console.log('Starting content generation with request:', request);
+      console.log('Starting enhanced content generation with request:', request);
       
-      const packageId = await generateContent(request);
+      // Use the enhanced generation endpoint
+      const contentPackage = await contentAPI.generateContentEnhanced(request);
       
-      console.log('Content generation started, package ID:', packageId);
+      console.log('Content generation started, package:', contentPackage);
       
-      // Set up progress tracking
+      // Set up progress tracking with enhanced metadata
       setCurrentGeneration({
-        packageId,
-        subject: request.subject,
-        unit: request.unit,
-        skill: request.skill,
-        subskill: request.subskill
+        packageId: contentPackage.id,
+        subject: contentPackage.subject,
+        unit: contentPackage.unit,
+        skill: contentPackage.skill,
+        subskill: contentPackage.subskill,
+        grade: contentPackage.grade
       });
       
     } catch (err) {
-      console.error('Content generation failed:', err);
+      console.error('Enhanced content generation failed:', err);
       setIsGenerating(false);
-      // Error is handled by the context
+      setError(err instanceof Error ? err.message : 'Content generation failed');
     }
   };
 
   const handleGenerationComplete = (packageId: string) => {
     console.log('Generation completed for package:', packageId);
     setIsGenerating(false);
-    // Could show success notification here
   };
 
   const startNewGeneration = () => {
     setCurrentGeneration(null);
     setIsGenerating(false);
-    clearError();
+    setError(null);
+  };
+
+  const clearError = () => {
+    setError(null);
   };
 
   return (
@@ -86,18 +98,18 @@ export default function GeneratePage() {
         
         <div className="text-center">
           <h1 className="text-4xl font-bold tracking-tight mb-4">
-            Generate Educational Content
+            Enhanced Content Generation
           </h1>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-            Create comprehensive learning materials with AI-powered content generation. 
-            Each package includes reading, visual, audio, and practice components.
+            Generate grade-appropriate learning materials from curriculum data or custom input. 
+            Browse your curriculum structure or manually specify learning objectives.
           </p>
         </div>
       </div>
 
       {/* Error Display */}
       {error && (
-        <div className="max-w-2xl mx-auto mb-6">
+        <div className="max-w-4xl mx-auto mb-6">
           <div className="bg-red-50 border border-red-200 rounded-lg p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -124,6 +136,37 @@ export default function GeneratePage() {
             onComplete={handleGenerationComplete}
           />
           
+          {/* Generation Info Panel */}
+          <div className="max-w-2xl mx-auto">
+            <div className="bg-white rounded-lg border shadow-sm p-6">
+              <h3 className="font-medium mb-4">Generation Details</h3>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Subject:</span>
+                  <p className="font-medium">{currentGeneration.subject}</p>
+                </div>
+                {currentGeneration.grade && (
+                  <div>
+                    <span className="text-muted-foreground">Grade:</span>
+                    <p className="font-medium">{currentGeneration.grade}</p>
+                  </div>
+                )}
+                <div>
+                  <span className="text-muted-foreground">Unit:</span>
+                  <p className="font-medium">{currentGeneration.unit}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Skill:</span>
+                  <p className="font-medium">{currentGeneration.skill}</p>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-muted-foreground">Subskill:</span>
+                  <p className="font-medium">{currentGeneration.subskill}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
           {/* Start New Generation Button */}
           <div className="text-center">
             <Button 
@@ -136,45 +179,68 @@ export default function GeneratePage() {
           </div>
         </div>
       ) : (
-        <ContentGenerationForm 
+        <EnhancedContentGenerationForm 
           onSubmit={handleGenerateContent}
           loading={isGenerating}
         />
       )}
 
-      {/* Help Section */}
+      {/* Enhanced Help Section */}
       <div className="max-w-4xl mx-auto mt-12">
         <div className="bg-white rounded-lg border shadow-sm p-6">
-          <h2 className="text-xl font-semibold mb-4">How Content Generation Works</h2>
+          <h2 className="text-xl font-semibold mb-4">Enhanced Content Generation Features</h2>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
-              <h3 className="font-medium mb-2">📝 What You Provide</h3>
+              <h3 className="font-medium mb-2">📚 Curriculum Mode</h3>
               <ul className="text-sm text-muted-foreground space-y-1">
-                <li>• Subject area (e.g., Mathematics)</li>
-                <li>• Unit topic (e.g., Algebra)</li>
-                <li>• Specific skill (e.g., Linear Equations)</li>
-                <li>• Subskill focus (e.g., Slope-Intercept Form)</li>
-                <li>• Difficulty level and prerequisites</li>
+                <li>• Browse your loaded curriculum structure</li>
+                <li>• Select from organized units, skills, and subskills</li>
+                <li>• Auto-populate with curriculum metadata</li>
+                <li>• View learning paths and prerequisites</li>
+                <li>• Override difficulty and prerequisites as needed</li>
               </ul>
             </div>
             
             <div>
-              <h3 className="font-medium mb-2">🎯 What You Get</h3>
+              <h3 className="font-medium mb-2">✏️ Manual Mode</h3>
               <ul className="text-sm text-muted-foreground space-y-1">
-                <li>• Structured reading content with key concepts</li>
-                <li>• Interactive p5.js visual demonstration</li>
-                <li>• Teacher-student audio dialogue</li>
-                <li>• Practice problems with teaching notes</li>
-                <li>• All content aligned to learning objectives</li>
+                <li>• Traditional manual entry for custom content</li>
+                <li>• Specify grade level for age-appropriate content</li>
+                <li>• Full control over difficulty and prerequisites</li>
+                <li>• Add custom instructions and requirements</li>
+                <li>• Perfect for content outside your curriculum</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <h3 className="font-medium mb-2">🎯 Grade-Appropriate Content</h3>
+              <ul className="text-sm text-muted-foreground space-y-1">
+                <li>• Reading level matched to grade</li>
+                <li>• Age-appropriate examples and language</li>
+                <li>• Cognitive complexity aligned to developmental stage</li>
+                <li>• Visual and audio content optimized for age group</li>
+              </ul>
+            </div>
+            
+            <div>
+              <h3 className="font-medium mb-2">🔗 Learning Path Integration</h3>
+              <ul className="text-sm text-muted-foreground space-y-1">
+                <li>• Prerequisite knowledge automatically included</li>
+                <li>• Next steps in learning sequence suggested</li>
+                <li>• Cross-curricular connections identified</li>
+                <li>• Coherent progression through curriculum</li>
               </ul>
             </div>
           </div>
 
           <div className="mt-6 p-4 bg-blue-50 rounded-lg">
             <p className="text-sm text-blue-800">
-              <strong>Pro Tip:</strong> Be specific with your subskill to get the most targeted content. 
-              For example, "Slope-Intercept Form" is better than just "Linear Equations."
+              <strong>Getting Started:</strong> If you have curriculum data loaded, try the Curriculum Mode 
+              to browse and select from your existing structure. Otherwise, use Manual Mode with the optional 
+              grade field to ensure age-appropriate content generation.
             </p>
           </div>
         </div>

@@ -1,4 +1,4 @@
-# backend/app/models/content.py - Updated with Cosmos DB integration
+# backend/app/models/content.py - Updated with Revision Support AND Grade Integration
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -9,11 +9,11 @@ import uuid
 class ContentStatus(str, Enum):
     DRAFT = "draft"
     GENERATING = "generating"
-    GENERATED = "generated"  # Added to match your system
+    GENERATED = "generated"
     APPROVED = "approved"
     PUBLISHED = "published"
     NEEDS_REVISION = "needs_revision"
-    REJECTED = "rejected"  # Added for review workflow
+    REJECTED = "rejected"
 
 
 class ComponentType(str, Enum):
@@ -29,9 +29,56 @@ class DifficultyLevel(str, Enum):
     ADVANCED = "advanced"
 
 
-# Request Models
+# NEW: Revision-specific models
+class ComponentRevision(BaseModel):
+    """Individual component revision request"""
+    component_type: ComponentType = Field(..., description="Which component to revise")
+    feedback: str = Field(..., description="Specific feedback for revision")
+    priority: str = Field(default="medium", description="Revision priority")
+    
+    @validator('feedback')
+    def validate_feedback(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Feedback cannot be empty")
+        return v.strip()
+
+
+class RevisionRequest(BaseModel):
+    """Request for revising content package components"""
+    package_id: str = Field(..., description="Package ID to revise")
+    subject: str = Field(..., description="Subject for partition key")
+    unit: str = Field(..., description="Unit for partition key")
+    revisions: List[ComponentRevision] = Field(..., description="Component revisions to apply")
+    reviewer_id: Optional[str] = Field(None, description="ID of reviewer requesting changes")
+    
+    @validator('revisions')
+    def validate_revisions(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError("At least one revision must be specified")
+        
+        # Check for duplicate component types
+        component_types = [r.component_type for r in v]
+        if len(component_types) != len(set(component_types)):
+            raise ValueError("Cannot have multiple revisions for the same component type")
+        
+        return v
+
+
+class RevisionEntry(BaseModel):
+    """Individual revision history entry"""
+    revision_id: str = Field(default_factory=lambda: f"rev_{int(datetime.utcnow().timestamp())}")
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    component_type: ComponentType = Field(..., description="Component that was revised")
+    feedback: str = Field(..., description="Feedback that triggered revision")
+    status: str = Field(default="completed", description="Revision status")
+    reviewer_id: Optional[str] = Field(None, description="Who requested the revision")
+    generation_time_ms: Optional[int] = Field(None, description="Time taken for revision")
+
+
+# Request Models - UPDATED WITH GRADE
 class ContentGenerationRequest(BaseModel):
     subject: str = Field(..., description="Subject area (e.g., Mathematics)")
+    grade: Optional[str] = Field(None, description="Grade level (e.g., Kindergarten, 1st Grade)")  # NEW FIELD
     unit: str = Field(..., description="Unit within subject (e.g., Algebra)")
     skill: str = Field(..., description="Specific skill (e.g., Linear Equations)")
     subskill: str = Field(..., description="Subskill (e.g., Slope-Intercept Form)")
@@ -39,6 +86,8 @@ class ContentGenerationRequest(BaseModel):
     prerequisites: List[str] = Field(default=[], description="Required prior knowledge")
     educator_id: Optional[str] = Field(None, description="Requesting educator ID")
     priority: str = Field(default="medium", description="Generation priority")
+    custom_instructions: Optional[str] = Field(None, description="Additional generation instructions")
+    content_types: List[str] = Field(default=["reading", "visual", "audio", "practice"], description="Content types to generate")
     
     @validator('subject', 'unit', 'skill', 'subskill')
     def validate_non_empty_strings(cls, v):
@@ -47,41 +96,44 @@ class ContentGenerationRequest(BaseModel):
         return v.strip()
 
 
-# Core Content Models
+# Curriculum-specific request models - UPDATED WITH GRADE
+class ManualContentRequest(BaseModel):
+    """Manual content generation request - UPDATED WITH GRADE"""
+    subject: str = Field(..., description="Subject area")
+    grade: Optional[str] = Field(None, description="Grade level")  # NEW FIELD
+    unit: str = Field(..., description="Unit within subject")
+    skill: str = Field(..., description="Specific skill")
+    subskill: str = Field(..., description="Subskill")
+    difficulty_level: str = Field(..., description="Difficulty level")
+    prerequisites: List[str] = Field(default_factory=list, description="Prerequisites")
+
+
+class CurriculumReferenceRequest(BaseModel):
+    """Request using curriculum reference for auto-population"""
+    subskill_id: str = Field(..., description="Subskill ID from curriculum")
+    auto_populate: bool = Field(default=True, description="Auto-populate from curriculum")
+    difficulty_level_override: Optional[str] = Field(None, description="Override difficulty level")
+    prerequisites_override: Optional[List[str]] = Field(None, description="Override prerequisites")
+
+
+class EnhancedContentGenerationRequest(BaseModel):
+    """Enhanced request that supports both manual and curriculum reference modes"""
+    mode: str = Field(..., description="Either 'manual' or 'curriculum'")
+    manual_request: Optional[ManualContentRequest] = Field(None, description="Manual generation request")
+    curriculum_request: Optional[CurriculumReferenceRequest] = Field(None, description="Curriculum reference request")
+    custom_instructions: Optional[str] = Field(None, description="Additional instructions")
+    content_types: Optional[List[str]] = Field(default=["reading", "visual", "audio", "practice"], description="Content types to generate")
+
+
+# Core Content Models - UPDATED WITH GRADE
 class MasterContext(BaseModel):
     core_concepts: List[str] = Field(..., description="Key concepts to be taught")
     key_terminology: Dict[str, str] = Field(..., description="Term definitions")
     learning_objectives: List[str] = Field(..., description="What students should learn")
     difficulty_level: str = Field(..., description="Content difficulty")
+    grade_level: Optional[str] = Field(None, description="Target grade level")  # NEW FIELD
     prerequisites: List[str] = Field(..., description="Required prior knowledge")
     real_world_applications: List[str] = Field(default=[], description="Practical applications")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "core_concepts": [
-                    "The structure and components of the slope-intercept form (y = mx + b).",
-                    "Understanding 'm' as the slope, representing the rate of change and steepness of the line (rise over run).",
-                    "Understanding 'b' as the y-intercept, representing the point where the line crosses the y-axis (the starting value when x=0)."
-                ],
-                "key_terminology": {
-                    "Linear Equation": "An equation whose graph is a straight line.",
-                    "Slope-Intercept Form": "A specific way to write linear equations, y = mx + b",
-                    "Slope": "A measure of the steepness and direction of a line",
-                    "Y-intercept": "The point where a line crosses the y-axis"
-                },
-                "learning_objectives": [
-                    "Students will be able to identify the slope and y-intercept directly from a linear equation written in slope-intercept form.",
-                    "Students will be able to graph a linear equation given in slope-intercept form by accurately plotting the y-intercept and using the slope to find additional points."
-                ],
-                "difficulty_level": "intermediate",
-                "prerequisites": ["basic_algebra", "coordinate_plane"],
-                "real_world_applications": [
-                    "Modeling costs: Calculating the total cost of a service (e.g., cell phone plan, taxi fare) that includes a fixed initial fee (y-intercept) and a per-unit charge (slope).",
-                    "Distance-time relationships: Representing constant speed (slope) and an initial starting position (y-intercept) in movement problems."
-                ]
-            }
-        }
 
 
 class CoherenceMarkers(BaseModel):
@@ -98,31 +150,6 @@ class ContentComponent(BaseModel):
     metadata: Dict[str, Any] = Field(default={}, description="Component metadata")
     coherence_markers: CoherenceMarkers = Field(default=CoherenceMarkers())
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "component_type": "reading",
-                "content": {
-                    "title": "Understanding Slope-Intercept Form",
-                    "sections": [
-                        {
-                            "heading": "What is Slope?",
-                            "content": "Slope represents the rate of change...",
-                            "key_terms_used": ["slope", "rate of change"],
-                            "concepts_covered": ["slope definition"]
-                        }
-                    ],
-                    "word_count": 1200,
-                    "reading_level": "Intermediate"
-                },
-                "metadata": {
-                    "word_count": 1200,
-                    "reading_level": "grade-9",
-                    "section_count": 4
-                }
-            }
-        }
 
 
 class GenerationMetadata(BaseModel):
@@ -141,42 +168,46 @@ class GenerationMetadata(BaseModel):
 
 
 class ContentPackage(BaseModel):
-    # Core identification - using your existing structure
+    # Core identification
     id: str = Field(..., description="Package ID (e.g., pkg_1748053402)")
     
-    # Content identification
+    # Content identification - UPDATED WITH GRADE
     subject: str = Field(..., description="Subject area")
+    grade: Optional[str] = Field(None, description="Grade level")  # NEW FIELD
     unit: str = Field(..., description="Unit within subject")
     skill: str = Field(..., description="Specific skill")
     subskill: str = Field(..., description="Subskill")
     
-    # Master context for coherence - required in your structure
+    # Master context for coherence
     master_context: MasterContext = Field(..., description="Master context for coherence")
     
-    # Content structure - your existing embedded format
+    # Content structure
     content: Dict[str, Any] = Field(..., description="Embedded content components")
     
-    # Generation information - required in your structure
+    # Generation information
     generation_metadata: GenerationMetadata = Field(..., description="Generation information")
     
-    # Cosmos DB specific fields (optional, added during storage)
+    # Cosmos DB specific fields
     partition_key: Optional[str] = Field(None, description="Partition key for Cosmos DB")
     document_type: Optional[str] = Field(None, description="Document type identifier")
     
-    # Status and workflow - FIXED: Using string instead of enum for compatibility
+    # Status and workflow
     status: str = Field(default="generated", description="Package status")
     created_by: Optional[str] = Field(None, description="Creator ID")
     
     # Component IDs (optional, for complex setups)
     content_ids: Dict[str, str] = Field(default={}, description="IDs of content components")
     
-    # Review information - FIXED: review_notes as List[Dict] to match API usage
+    # Review information
     review_status: str = Field(default="pending", description="Review status")
     reviewed_by: Optional[str] = Field(None, description="Reviewer ID")
     reviewed_at: Optional[str] = Field(None, description="Review timestamp as ISO string")
     review_notes: List[Dict[str, Any]] = Field(default=[], description="Review feedback as objects")
     
-    # Timestamps - FIXED: Using Optional[str] for better serialization
+    # NEW: Revision history
+    revision_history: List[RevisionEntry] = Field(default=[], description="History of revisions made")
+    
+    # Timestamps
     created_at: Optional[str] = Field(None, description="Creation timestamp as ISO string")
     updated_at: Optional[str] = Field(None, description="Last update timestamp as ISO string")
     
@@ -193,99 +224,6 @@ class ContentPackage(BaseModel):
             data['updated_at'] = current_time
             
         super().__init__(**data)
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "id": "pkg_1748053402",
-                "subject": "Mathematics",
-                "unit": "Algebra",
-                "skill": "Linear Equations",
-                "subskill": "Slope-Intercept Form",
-                "status": "generated",
-                "master_context": {
-                    "core_concepts": [
-                        "The structure and components of the slope-intercept form (y = mx + b)"
-                    ],
-                    "key_terminology": {
-                        "Linear Equation": "An equation whose graph is a straight line"
-                    },
-                    "learning_objectives": [
-                        "Students will be able to identify the slope and y-intercept"
-                    ],
-                    "difficulty_level": "intermediate",
-                    "prerequisites": ["basic_algebra"],
-                    "real_world_applications": ["Modeling costs"]
-                },
-                "content": {
-                    "reading": {
-                        "title": "Understanding Slope-Intercept Form",
-                        "sections": [
-                            {
-                                "heading": "Introduction",
-                                "content": "Linear equations are...",
-                                "key_terms_used": ["Linear Equation"],
-                                "concepts_covered": ["introduction"]
-                            }
-                        ],
-                        "word_count": 1150,
-                        "reading_level": "Intermediate"
-                    },
-                    "visual": {
-                        "p5_code": "function setup() { createCanvas(800, 600); }",
-                        "description": "Interactive slope-intercept demonstration",
-                        "interactive_elements": ["slope_slider", "y_intercept_slider"],
-                        "concepts_demonstrated": ["slope", "y-intercept"],
-                        "user_instructions": "Adjust sliders to see effects"
-                    },
-                    "audio": {
-                        "audio_file_path": "generated_audio/audio_pkg_1748053402.wav",
-                        "audio_filename": "audio_pkg_1748053402.wav",
-                        "dialogue_script": "Teacher: Today we'll learn about...",
-                        "duration_seconds": 356.4,
-                        "voice_config": {
-                            "teacher_voice": "Zephyr",
-                            "student_voice": "Puck"
-                        },
-                        "tts_status": "success"
-                    },
-                    "practice": {
-                        "problems": [
-                            {
-                                "id": "Mathematics_SKILL-01_SUBSKILL-01-A_timestamp_uuid",
-                                "problem_data": {
-                                    "problem_type": "Multiple Choice",
-                                    "problem": "What is the slope of y = 2x + 3?",
-                                    "answer": "2",
-                                    "success_criteria": ["Identify slope coefficient"],
-                                    "teaching_note": "Slope is coefficient of x",
-                                    "metadata": {
-                                        "subject": "Mathematics",
-                                        "unit": {"id": "ALGEBRA001", "title": "Algebra"},
-                                        "skill": {"id": "ALGEBRA001-01", "description": "Linear Equations"},
-                                        "subskill": {"id": "ALGEBRA001-01-A", "description": "Slope-Intercept Form"}
-                                    }
-                                }
-                            }
-                        ],
-                        "problem_count": 9,
-                        "estimated_time_minutes": 18
-                    }
-                },
-                "generation_metadata": {
-                    "generation_time_ms": 241507,
-                    "coherence_score": 0.9
-                },
-                "review_notes": [
-                    {
-                        "note": "Content looks good overall",
-                        "status": "approved", 
-                        "timestamp": "2025-05-27T12:00:00Z",
-                        "reviewer_id": "educator_123"
-                    }
-                ]
-            }
-        }
     
     @validator('content')
     def validate_content_structure(cls, v):
@@ -313,11 +251,12 @@ class GenerationProgress(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-# Batch Generation Request
+# Batch Generation Request - UPDATED WITH GRADE
 class BatchGenerationRequest(BaseModel):
     requests: List[ContentGenerationRequest] = Field(..., description="Multiple content requests")
     batch_name: Optional[str] = Field(None, description="Batch identifier")
     priority: str = Field(default="medium")
+    target_grade: Optional[str] = Field(None, description="Target grade for all requests in batch")  # NEW FIELD
     
     @validator('requests')
     def validate_batch_size(cls, v):
@@ -334,12 +273,14 @@ class StorageMetadata(BaseModel):
     updated_at: str = Field(..., description="ISO timestamp when last updated")
     version: int = Field(default=1, description="Document version number")
     content_hash: str = Field(..., description="SHA256 hash of content for integrity")
+    revision_history: List[RevisionEntry] = Field(default=[], description="Revision history")
 
 
-# Review Queue Entry (for educator workflow)
+# Review Queue Entry (for educator workflow) - UPDATED WITH GRADE
 class ReviewQueueEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     package_id: str = Field(..., description="Content package ID to review")
+    grade_level: Optional[str] = Field(None, description="Grade level of content")  # NEW FIELD
     educator_id: str = Field(..., description="Assigned educator ID")
     assigned_at: datetime = Field(default_factory=datetime.utcnow)
     priority: str = Field(default="medium", description="Review priority")
@@ -347,81 +288,3 @@ class ReviewQueueEntry(BaseModel):
     review_type: str = Field(default="initial", description="Type of review")
     due_date: Optional[datetime] = Field(None, description="Review due date")
     status: str = Field(default="assigned", description="Review status")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "package_id": "pkg_1748053402",
-                "educator_id": "educator_123",
-                "priority": "high",
-                "estimated_review_time": 20,
-                "review_type": "initial"
-            }
-        }# backend/app/models/content.py - Updated to match your exact structure
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional, Union
-from datetime import datetime
-from enum import Enum
-
-
-class MasterContext(BaseModel):
-    """Master context that ensures coherence across all content types"""
-    core_concepts: List[str]
-    key_terminology: Dict[str, str]
-    learning_objectives: List[str]
-    difficulty_level: str
-    prerequisites: List[str]
-    real_world_applications: List[str]
-
-
-class GenerationMetadata(BaseModel):
-    """Metadata about the content generation process"""
-    generation_time_ms: int
-    coherence_score: float
-
-
-class ContentPackage(BaseModel):
-    """Complete educational content package matching your exact structure"""
-    id: str
-    subject: str
-    unit: str
-    skill: str
-    subskill: str
-    master_context: MasterContext
-    content: Dict[str, Any]  # Contains reading, visual, audio, practice
-    generation_metadata: GenerationMetadata
-    
-    # Optional fields that might be added during storage
-    partition_key: Optional[str] = None
-    
-    def __init__(self, **data):
-        # Automatically generate partition_key if not provided
-        if 'partition_key' not in data and 'subject' in data and 'unit' in data:
-            data['partition_key'] = f"{data['subject']}-{data['unit']}"
-        super().__init__(**data)
-
-
-class ContentGenerationRequest(BaseModel):
-    """Request for generating educational content"""
-    subject: str
-    unit: str
-    skill: str
-    subskill: str
-    difficulty_level: str = "intermediate"
-    prerequisites: List[str] = []
-
-
-class ComponentType(str, Enum):
-    """Types of content components"""
-    READING = "reading"
-    VISUAL = "visual"
-    AUDIO = "audio"
-    PRACTICE = "practice"
-
-
-class ContentComponent(BaseModel):
-    """Individual content component (for internal use)"""
-    package_id: str
-    component_type: ComponentType
-    content: Dict[str, Any]
-    metadata: Dict[str, Any] = {}
