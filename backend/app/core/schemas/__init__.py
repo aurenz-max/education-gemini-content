@@ -1,0 +1,14 @@
+# backend/app/core/schemas/__init__.py
+from .content_schemas import (
+    MASTER_CONTEXT_SCHEMA,
+    READING_CONTENT_SCHEMA,
+    VISUAL_METADATA_SCHEMA,
+    PRACTICE_PROBLEMS_SCHEMA
+)
+
+__all__ = [
+    "MASTER_CONTEXT_SCHEMA",
+    "READING_CONTENT_SCHEMA", 
+    "VISUAL_METADATA_SCHEMA",
+    "PRACTICE_PROBLEMS_SCHEMA"
+]

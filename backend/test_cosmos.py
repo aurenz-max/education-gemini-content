@@ -1,6 +1,6 @@
 # backend/test_cosmos_simple.py
 """
-Simplified Cosmos DB test using direct .env approach (like test_generation.py)
+Simplified Cosmos DB test using main cosmos_service (with datetime fix)
 Run with: python test_cosmos_simple.py
 """
 
@@ -27,281 +27,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Set higher log levels for Azure SDKs to reduce verbosity
-logging.getLogger('azure').setLevel(logging.WARNING)  # or logging.ERROR for even less output
-logging.getLogger('azure.cosmos').setLevel(logging.INFO)  # Specifically for Cosmos DB
-logging.getLogger('urllib3').setLevel(logging.WARNING)  # For HTTP request logs
+logging.getLogger('azure').setLevel(logging.WARNING)
+logging.getLogger('azure.cosmos').setLevel(logging.INFO)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-# Direct imports - no config file dependency
+# Import the main cosmos service (with datetime fix)
+from app.database.cosmos_client import cosmos_service
 from app.models.content import ContentPackage, MasterContext, GenerationMetadata
-
-# Direct Azure Cosmos imports
-from azure.cosmos import CosmosClient, PartitionKey, exceptions
-import hashlib
-import json
-
-
-class DirectCosmosService:
-    """Direct Cosmos DB service without config file dependency"""
-    
-    def __init__(self):
-        # Get credentials directly from environment
-        self.endpoint = os.getenv("COSMOS_DB_ENDPOINT")
-        self.key = os.getenv("COSMOS_DB_KEY")
-        self.database_name = os.getenv("COSMOS_DB_DATABASE_NAME", "educational_content")
-        self.container_name = os.getenv("COSMOS_DB_CONTAINER_NAME", "content_packages")
-        
-        self.client = None
-        self.database = None
-        self.container = None
-        self._initialized = False
-    
-    def validate_credentials(self):
-        """Validate that we have the required credentials"""
-        if not self.endpoint:
-            print("❌ COSMOS_DB_ENDPOINT not found in environment")
-            return False
-        
-        if not self.key:
-            print("❌ COSMOS_DB_KEY not found in environment")
-            return False
-        
-        print(f"✅ COSMOS_DB_ENDPOINT: {self.endpoint[:50]}...")
-        print(f"✅ COSMOS_DB_KEY: ***{self.key[-10:]}")
-        print(f"✅ Database Name: {self.database_name}")
-        print(f"✅ Container Name: {self.container_name}")
-        
-        return True
-    
-    async def initialize(self):
-        """Initialize Cosmos DB connection"""
-        try:
-            if not self.validate_credentials():
-                return False
-            
-            print("🔌 Creating Cosmos DB client...")
-            self.client = CosmosClient(self.endpoint, self.key)
-            
-            print("🗄️ Creating/getting database...")
-            self.database = self.client.create_database_if_not_exists(id=self.database_name)
-            
-            print("📦 Creating/getting container...")
-            self.container = self.database.create_container_if_not_exists(
-                id=self.container_name,
-                partition_key=PartitionKey(path="/partition_key"),
-                offer_throughput=400
-            )
-            
-            self._initialized = True
-            print("✅ Cosmos DB initialized successfully")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Cosmos DB initialization failed: {e}")
-            logger.error(f"Initialization failed: {e}")
-            return False
-    
-    async def health_check(self):
-        """Simple health check"""
-        if not self._initialized:
-            return {"status": "not_initialized"}
-        
-        try:
-            # Count documents
-            query = "SELECT VALUE COUNT(1) FROM c"
-            items = list(self.container.query_items(query, enable_cross_partition_query=True))
-            count = items[0] if items else 0
-            
-            return {
-                "status": "healthy",
-                "total_documents": count,
-                "database": self.database_name,
-                "container": self.container_name
-            }
-        except Exception as e:
-            return {"status": "unhealthy", "error": str(e)}
-    
-    def _add_storage_metadata(self, document, is_update=False):
-        """Add storage metadata"""
-        now = datetime.now(timezone.utc).isoformat()
-        
-        if not is_update:
-            document["storage_metadata"] = {
-                "created_at": now,
-                "updated_at": now,
-                "version": 1
-            }
-        else:
-            if "storage_metadata" not in document:
-                document["storage_metadata"] = {}
-            document["storage_metadata"]["updated_at"] = now
-            document["storage_metadata"]["version"] = document["storage_metadata"].get("version", 1) + 1
-        
-        return document
-    
-    async def create_content_package(self, package: ContentPackage):
-        """Create a content package"""
-        if not self._initialized:
-            raise RuntimeError("Service not initialized")
-        
-        try:
-            # Convert to dict and add metadata
-            document = package.model_dump()
-            document["partition_key"] = f"{package.subject}-{package.unit}"
-            document = self._add_storage_metadata(document)
-            document["document_type"] = "content_package"
-            document["status"] = "generated"
-            
-            print(f"💾 Creating package: {package.id}")
-            print(f"   📍 Partition Key: {document['partition_key']}")
-            print(f"   📊 Document Size: ~{len(str(document))} characters")
-            print(f"   🏷️  Status: {document['status']}")
-            
-            response = self.container.create_item(body=document)
-            
-            print(f"   ✅ Package created with storage metadata:")
-            print(f"      📅 Created: {response['storage_metadata']['created_at']}")
-            print(f"      🔢 Version: {response['storage_metadata']['version']}")
-            
-            return ContentPackage(**response)
-            
-        except exceptions.CosmosHttpResponseError as e:
-            if e.status_code == 409:
-                raise ValueError(f"Package {package.id} already exists")
-            raise
-    
-    async def get_content_package(self, package_id: str, partition_key: str):
-        """Get a content package"""
-        if not self._initialized:
-            raise RuntimeError("Service not initialized")
-        
-        try:
-            print(f"🔍 Retrieving package: {package_id}")
-            print(f"   📍 Using partition key: {partition_key}")
-            
-            response = self.container.read_item(item=package_id, partition_key=partition_key)
-            
-            print(f"   ✅ Package found:")
-            print(f"      📝 Subject: {response.get('subject')}")
-            print(f"      📚 Unit: {response.get('unit')}")
-            print(f"      🎯 Skill: {response.get('skill')}")
-            print(f"      📅 Created: {response.get('storage_metadata', {}).get('created_at', 'N/A')}")
-            print(f"      🏷️  Status: {response.get('status', 'N/A')}")
-            
-            return ContentPackage(**response)
-        except exceptions.CosmosResourceNotFoundError:
-            print(f"   ❌ Package not found: {package_id}")
-            return None
-    
-    async def update_content_package(self, package: ContentPackage):
-        """Update a content package"""
-        if not self._initialized:
-            raise RuntimeError("Service not initialized")
-        
-        try:
-            print(f"🔄 Updating package: {package.id}")
-            print(f"   📝 New skill: {package.skill}")
-            
-            document = package.model_dump()
-            old_version = document.get("storage_metadata", {}).get("version", 1)
-            document = self._add_storage_metadata(document, is_update=True)
-            new_version = document["storage_metadata"]["version"]
-            
-            print(f"   🔢 Version: {old_version} → {new_version}")
-            
-            response = self.container.replace_item(item=package.id, body=document)
-            
-            print(f"   ✅ Package updated successfully")
-            print(f"      📅 Updated: {response['storage_metadata']['updated_at']}")
-            
-            return ContentPackage(**response)
-            
-        except exceptions.CosmosResourceNotFoundError:
-            raise ValueError(f"Package {package.id} not found")
-    
-    async def delete_content_package(self, package_id: str, partition_key: str):
-        """Delete a content package"""
-        if not self._initialized:
-            raise RuntimeError("Service not initialized")
-        
-        try:
-            print(f"🗑️  Deleting package: {package_id}")
-            print(f"   📍 Partition key: {partition_key}")
-            
-            self.container.delete_item(item=package_id, partition_key=partition_key)
-            
-            print(f"   ✅ Package deleted successfully from Cosmos DB")
-            return True
-        except exceptions.CosmosResourceNotFoundError:
-            print(f"   ❌ Package not found for deletion: {package_id}")
-            return False
-    
-    async def list_content_packages(self, subject=None, limit=100):
-        """List content packages"""
-        if not self._initialized:
-            raise RuntimeError("Service not initialized")
-        
-        try:
-            conditions = ["c.document_type = 'content_package'"]
-            parameters = []
-            
-            if subject:
-                conditions.append("c.subject = @subject")
-                parameters.append({"name": "@subject", "value": subject})
-            
-            query = f"SELECT * FROM c WHERE {' AND '.join(conditions)} ORDER BY c.storage_metadata.created_at DESC"
-            
-            print(f"📋 Listing packages with query:")
-            print(f"   🔍 Query: {query}")
-            print(f"   📊 Parameters: {parameters}")
-            print(f"   📏 Limit: {limit}")
-            
-            packages = []
-            items = list(self.container.query_items(
-                query=query,
-                parameters=parameters,
-                max_item_count=limit,
-                enable_cross_partition_query=True
-            ))
-            
-            print(f"   📦 Raw items found: {len(items)}")
-            
-            for i, item in enumerate(items):
-                packages.append(ContentPackage(**item))
-                print(f"      {i+1}. {item['id']} ({item['subject']}/{item['unit']} - {item['skill']})")
-            
-            return packages
-            
-        except Exception as e:
-            logger.error(f"List failed: {e}")
-            raise
-    
-    async def update_package_status(self, package_id: str, partition_key: str, status: str):
-        """Update package status"""
-        print(f"🏷️  Updating status for package: {package_id}")
-        print(f"   📍 Partition key: {partition_key}")
-        print(f"   🔄 New status: {status}")
-        
-        package = await self.get_content_package(package_id, partition_key)
-        if not package:
-            print(f"   ❌ Package not found for status update")
-            return False
-        
-        old_status = getattr(package, 'status', 'unknown')
-        package_dict = package.model_dump()
-        package_dict["status"] = status
-        package_dict = self._add_storage_metadata(package_dict, is_update=True)
-        
-        print(f"   🏷️  Status change: {old_status} → {status}")
-        
-        self.container.replace_item(item=package_id, body=package_dict)
-        
-        print(f"   ✅ Status updated successfully")
-        return True
-    
-    def close(self):
-        """Close connection"""
-        self.client = None
-        print("🔌 Cosmos DB connection closed")
 
 
 async def create_test_package():
@@ -409,22 +141,47 @@ async def create_test_package():
     return package
 
 
+async def validate_environment():
+    """Validate environment variables"""
+    endpoint = os.getenv("COSMOS_DB_ENDPOINT")
+    key = os.getenv("COSMOS_DB_KEY")
+    database_name = os.getenv("COSMOS_DB_DATABASE_NAME", "educational_content")
+    container_name = os.getenv("COSMOS_DB_CONTAINER_NAME", "content_packages")
+    
+    if not endpoint:
+        print("❌ COSMOS_DB_ENDPOINT not found in environment")
+        return False
+    
+    if not key:
+        print("❌ COSMOS_DB_KEY not found in environment")
+        return False
+    
+    print(f"✅ COSMOS_DB_ENDPOINT: {endpoint[:50]}...")
+    print(f"✅ COSMOS_DB_KEY: ***{key[-10:]}")
+    print(f"✅ Database Name: {database_name}")
+    print(f"✅ Container Name: {container_name}")
+    
+    return True
+
+
 async def run_cosmos_tests():
-    """Run all CRUD tests"""
+    """Run all CRUD tests using the main cosmos service"""
     
     print("🧪 SIMPLIFIED COSMOS DB TEST SUITE")
     print("=" * 50)
     
-    # Create service instance
-    cosmos_service = DirectCosmosService()
-    
     try:
-        # Initialize
+        # Validate environment first
+        if not await validate_environment():
+            return False
+        
+        # Initialize the main cosmos service
         print("\n1️⃣ Initializing Cosmos DB...")
         success = await cosmos_service.initialize()
         if not success:
             print("❌ Initialization failed")
             return False
+        print("✅ Cosmos DB initialized successfully")
         
         # Health check
         print("\n2️⃣ Health Check...")
@@ -435,39 +192,85 @@ async def run_cosmos_tests():
         # Create test package
         print("\n3️⃣ Testing CREATE...")
         test_package = await create_test_package()
+        
+        print(f"💾 Creating package: {test_package.id}")
+        print(f"   📍 Partition Key: {test_package.subject}-{test_package.unit}")
+        print(f"   📊 Document Size: ~{len(str(test_package.model_dump()))} characters")
+        print(f"   🏷️  Status: generated")
+        
+        # Use the main cosmos service (with datetime fix)
         created_package = await cosmos_service.create_content_package(test_package)
         print(f"✅ Created: {created_package.id}")
         
         # Read test
         print("\n4️⃣ Testing READ...")
         partition_key = f"{test_package.subject}-{test_package.unit}"
+        print(f"🔍 Retrieving package: {test_package.id}")
+        print(f"   📍 Using partition key: {partition_key}")
+        
         retrieved = await cosmos_service.get_content_package(test_package.id, partition_key)
-        print(f"✅ Retrieved: {retrieved.id}")
+        if retrieved:
+            print(f"   ✅ Package found:")
+            print(f"      📝 Subject: {retrieved.subject}")
+            print(f"      📚 Unit: {retrieved.unit}")
+            print(f"      🎯 Skill: {retrieved.skill}")
+            print(f"      🏷️  Status: {getattr(retrieved, 'status', 'N/A')}")
+            print(f"✅ Retrieved: {retrieved.id}")
+        else:
+            print(f"   ❌ Package not found: {test_package.id}")
+            return False
         
         # List test
         print("\n5️⃣ Testing LIST...")
+        print(f"📋 Listing packages with subject filter: Mathematics")
         packages = await cosmos_service.list_content_packages(subject="Mathematics")
+        print(f"   📦 Found {len(packages)} packages")
+        for i, pkg in enumerate(packages[:3]):  # Show first 3
+            print(f"      {i+1}. {pkg.id} ({pkg.subject}/{pkg.unit} - {pkg.skill})")
         print(f"✅ Found {len(packages)} packages")
         
         # Update test
         print("\n6️⃣ Testing UPDATE...")
+        print(f"🔄 Updating package: {retrieved.id}")
+        old_skill = retrieved.skill
         retrieved.skill = "Updated Linear Equations"
+        print(f"   📝 Skill change: {old_skill} → {retrieved.skill}")
+        
         updated = await cosmos_service.update_content_package(retrieved)
+        print(f"   ✅ Package updated successfully")
         print(f"✅ Updated: {updated.skill}")
         
         # Status update test
         print("\n7️⃣ Testing STATUS UPDATE...")
+        print(f"🏷️  Updating status for package: {test_package.id}")
+        print(f"   📍 Partition key: {partition_key}")
+        print(f"   🔄 New status: approved")
+        
         status_updated = await cosmos_service.update_package_status(test_package.id, partition_key, "approved")
+        print(f"   ✅ Status updated successfully")
         print(f"✅ Status updated: {status_updated}")
         
         # Delete test
         print("\n8️⃣ Testing DELETE...")
+        print(f"🗑️  Deleting package: {test_package.id}")
+        print(f"   📍 Partition key: {partition_key}")
+        
         deleted = await cosmos_service.delete_content_package(test_package.id, partition_key)
+        if deleted:
+            print(f"   ✅ Package deleted successfully from Cosmos DB")
+        else:
+            print(f"   ❌ Package not found for deletion: {test_package.id}")
         print(f"✅ Deleted: {deleted}")
         
         # Verify deletion
+        print("\n9️⃣ Verifying deletion...")
         verify_deleted = await cosmos_service.get_content_package(test_package.id, partition_key)
-        print(f"✅ Deletion verified: {verify_deleted is None}")
+        deletion_verified = verify_deleted is None
+        if deletion_verified:
+            print(f"   ✅ Package confirmed deleted")
+        else:
+            print(f"   ❌ Package still exists after deletion")
+        print(f"✅ Deletion verified: {deletion_verified}")
         
         print("\n🎉 ALL TESTS PASSED!")
         return True
@@ -478,6 +281,7 @@ async def run_cosmos_tests():
         return False
         
     finally:
+        # The main service handles its own cleanup
         cosmos_service.close()
 
 

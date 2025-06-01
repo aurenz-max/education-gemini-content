@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     GENERATION_TIMEOUT: int = 300
     
     # Audio Configuration
+    ENABLE_TTS: bool = True  # NEW: Toggle for text-to-speech generation
     AUDIO_STORAGE_PATH: str = "generated_audio"  # Local path for temp storage
     AUDIO_FORMAT: str = "wav"
     DEFAULT_TEACHER_VOICE: str = "Zephyr"
@@ -113,6 +114,11 @@ class Settings(BaseSettings):
     def blob_storage_enabled(self) -> bool:
         """Check if blob storage is properly configured"""
         return bool(self.AZURE_STORAGE_CONNECTION_STRING and self.AZURE_STORAGE_CONTAINER_NAME)
+    
+    @property
+    def tts_enabled(self) -> bool:
+        """Check if TTS is enabled and properly configured"""
+        return self.ENABLE_TTS and bool(self.GEMINI_API_KEY)
     
     def get_cors_origins(self) -> List[str]:
         if self.is_production:
@@ -190,11 +196,13 @@ def validate_settings():
     # Success message
     if settings.is_development:
         storage_status = "Enabled" if settings.blob_storage_enabled else "Disabled"
+        tts_status = "Enabled" if settings.tts_enabled else "Disabled"
         print(f"🔧 Configuration loaded successfully")
         print(f"   📊 Environment: {settings.ENVIRONMENT}")
         print(f"   🗄️  Database: {'Configured' if settings.COSMOS_DB_ENDPOINT else 'Not configured'}")
         print(f"   📁 Blob Storage: {storage_status}")
         print(f"   🤖 AI Service: {'Configured' if settings.GEMINI_API_KEY else 'Not configured'}")
+        print(f"   🔊 TTS Service: {tts_status}")
 
 
 # Validate on import

@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Union
 from azure.cosmos import CosmosClient, PartitionKey, exceptions
@@ -93,10 +94,22 @@ class CosmosDBService:
         if not self._initialized:
             raise RuntimeError("CosmosDBService not initialized. Call initialize() first.")
     
+    def _convert_datetime_to_string(self, obj: Any) -> Any:
+        """Recursively convert datetime objects to ISO format strings"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {key: self._convert_datetime_to_string(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_datetime_to_string(item) for item in obj]
+        else:
+            return obj
+    
     def _generate_content_hash(self, content: Dict[str, Any]) -> str:
         """Generate SHA256 hash of content for integrity checking"""
-        import json
-        content_str = json.dumps(content, sort_keys=True)
+        # Convert datetime objects before hashing
+        clean_content = self._convert_datetime_to_string(content)
+        content_str = json.dumps(clean_content, sort_keys=True, default=str)
         return hashlib.sha256(content_str.encode()).hexdigest()
     
     def _add_storage_metadata(self, document: Dict[str, Any], is_update: bool = False) -> Dict[str, Any]:
@@ -137,6 +150,9 @@ class CosmosDBService:
             # Convert to dict and add metadata - preserve exact structure
             document = package.model_dump(mode='json')
             
+            # FIXED: Convert all datetime objects to strings
+            document = self._convert_datetime_to_string(document)
+            
             # Don't add partition_key to document if it doesn't exist in original
             if "partition_key" not in document:
                 document["partition_key"] = f"{package.subject}-{package.unit}"
@@ -146,6 +162,7 @@ class CosmosDBService:
             document["status"] = "generated"  # Initial status
             
             logger.info(f"Creating content package: {package.id}")
+            logger.debug(f"Document keys: {list(document.keys())}")
             
             # Retry logic for transient failures
             for attempt in range(settings.COSMOS_DB_MAX_RETRY_ATTEMPTS):
@@ -169,6 +186,11 @@ class CosmosDBService:
                         
         except Exception as e:
             logger.error(f"Failed to create content package {package.id}: {str(e)}")
+            logger.error(f"Document type check: {type(document)}")
+            # Log problematic fields for debugging
+            for key, value in document.items():
+                if isinstance(value, datetime):
+                    logger.error(f"Found datetime field: {key} = {value}")
             raise
     
     async def get_content_package(self, package_id: str, partition_key: str) -> Optional[ContentPackage]:
@@ -199,6 +221,10 @@ class CosmosDBService:
         try:
             # Convert to dict and update metadata
             document = package.model_dump(mode='json')
+            
+            # FIXED: Convert all datetime objects to strings
+            document = self._convert_datetime_to_string(document)
+            
             document = self._add_storage_metadata(document, is_update=True)
             
             logger.info(f"Updating content package: {package.id}")
@@ -301,6 +327,9 @@ class CosmosDBService:
             # Update status
             package_dict = package.model_dump()
             package_dict["status"] = status
+            
+            # FIXED: Convert datetime objects before storage metadata update
+            package_dict = self._convert_datetime_to_string(package_dict)
             package_dict = self._add_storage_metadata(package_dict, is_update=True)
             
             logger.info(f"Updating package {package_id} status to: {status}")

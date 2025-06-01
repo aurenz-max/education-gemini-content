@@ -416,27 +416,6 @@ export class ContentAPI {
 
   // ==================== REVIEW WORKFLOW METHODS ====================
 
-  async getReviewQueue(filters?: {
-    subject?: string;
-    unit?: string;
-    limit?: number;
-  }): Promise<ContentPackage[]> {
-    const params = new URLSearchParams();
-    if (filters?.subject) params.append('subject', filters.subject);
-    if (filters?.unit) params.append('unit', filters.unit);
-    if (filters?.limit) params.append('limit', filters.limit.toString());
-    
-    const response = await fetch(
-      `${this.baseUrl}/api/v1/packages/review-queue?${params}`
-    );
-    
-    if (!response.ok) {
-      throw new Error('Failed to get packages for review');
-    }
-    
-    return response.json();
-  }
-
   async updatePackageStatus(
     packageId: string,
     subject: string,

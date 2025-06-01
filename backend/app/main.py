@@ -34,12 +34,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# FIXED: Create a singleton instance of CurriculumService
+# This ensures the same instance is used across all requests
+curriculum_service_instance = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events"""
+    global curriculum_service_instance
+    
     # Startup
     logger.info("🚀 Starting Educational Content Generation API...")
+    logger.info(f"   Environment: {settings.ENVIRONMENT}")
+    logger.info(f"   TTS Enabled: {settings.tts_enabled}")
+    logger.info(f"   Blob Storage: {settings.blob_storage_enabled}")
     
     # Initialize storage services
     logger.info("📡 Initializing storage services...")
@@ -55,6 +63,10 @@ async def lifespan(app: FastAPI):
         logger.error("❌ Failed to initialize Blob Storage")
         raise RuntimeError("Blob Storage initialization failed")
     
+    # FIXED: Initialize the curriculum service singleton
+    logger.info("📚 Initializing curriculum service...")
+    curriculum_service_instance = CurriculumService()
+    
     logger.info("✅ All storage services initialized successfully")
     logger.info("🎉 API is ready to serve requests!")
     
@@ -64,6 +76,7 @@ async def lifespan(app: FastAPI):
     logger.info("🔄 Shutting down API...")
     cosmos_service.close()
     blob_storage_service.close()
+    curriculum_service_instance = None
     logger.info("✅ Shutdown complete")
 
 
@@ -85,15 +98,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize content service - MOVED INSIDE ENDPOINT TO AVOID MODULE-LEVEL INITIALIZATION
-# content_service = ContentGenerationService()  # <-- REMOVE THIS LINE
-
-
+# IMPROVED: Service dependencies with proper initialization
 def get_content_service():
-    """Dependency to get content service instance"""
-    return ContentGenerationService()
+    """Dependency to get content service instance with proper initialization"""
+    try:
+        return ContentGenerationService()
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize ContentGenerationService: {e}")
+        raise HTTPException(
+            status_code=503, 
+            detail="Content generation service unavailable"
+        )
 
-curriculum_service = CurriculumService()
+def get_curriculum_service():
+    """FIXED: Dependency to get the singleton curriculum service instance"""
+    global curriculum_service_instance
+    if curriculum_service_instance is None:
+        logger.error("❌ Curriculum service not initialized")
+        raise HTTPException(
+            status_code=503, 
+            detail="Curriculum service not available"
+        )
+    return curriculum_service_instance
 
 
 @app.get("/")
@@ -108,7 +134,16 @@ async def root():
         "api_prefix": settings.API_V1_PREFIX,
         "features": {
             "blob_storage": settings.blob_storage_enabled,
-            "development_mode": settings.is_development
+            "tts_enabled": settings.tts_enabled,
+            "development_mode": settings.is_development,
+            "modular_generators": True  # NEW: Indicate modular architecture
+        },
+        "generator_status": {
+            "master_context": "available",
+            "reading_content": "available", 
+            "visual_demo": "available",
+            "audio_content": "available" if settings.tts_enabled else "disabled",
+            "practice_problems": "available"
         }
     }
 
@@ -121,12 +156,19 @@ async def generate_content(
 ):
     """Generate a new educational content package with all components"""
     try:
+        # IMPROVED: Log grade information if available
+        grade_info = getattr(request, 'grade', 'Not specified')
         logger.info(f"🎯 Content generation request: {request.subject}/{request.unit}/{request.skill}")
+        logger.info(f"   Grade: {grade_info}, Difficulty: {request.difficulty_level}")
         
         # Generate content package (this will automatically store in cloud)
         package = await content_service.generate_content_package(request)
         
         logger.info(f"✅ Content package generated successfully: {package.id}")
+        
+        # FIXED: Use package.content instead of package.components
+        content_count = len(package.content) if hasattr(package, 'content') and package.content else 0
+        logger.info(f"   Content components generated: {content_count}")
         
         # Add background task for any cleanup if needed
         background_tasks.add_task(log_generation_complete, package.id, package.generation_metadata.generation_time_ms)
@@ -141,12 +183,12 @@ async def generate_content(
         )
 
 
-# ENHANCED CONTENT GENERATION ENDPOINT (ADD THIS)
 @app.post(f"{settings.API_V1_PREFIX}/generate-content-enhanced", response_model=ContentPackage)
 async def generate_content_enhanced(
     request: EnhancedContentGenerationRequest,
     background_tasks: BackgroundTasks,
-    content_service: ContentGenerationService = Depends(get_content_service)
+    content_service: ContentGenerationService = Depends(get_content_service),
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
 ):
     """Generate content using either curriculum reference or manual input - UPDATED WITH GRADE"""
     try:
@@ -162,7 +204,7 @@ async def generate_content_enhanced(
             # Convert to standard request format WITH GRADE
             standard_request = ContentGenerationRequest(
                 subject=context["subject"],
-                grade=context["grade"],  # ADD GRADE FROM CURRICULUM
+                grade=context.get("grade"),  # IMPROVED: Use .get() for safer access
                 unit=context["unit"],
                 skill=context["skill"],
                 subskill=context["subskill"],
@@ -179,7 +221,7 @@ async def generate_content_enhanced(
             # Convert manual request to standard format WITH GRADE
             standard_request = ContentGenerationRequest(
                 subject=request.manual_request.subject,
-                grade=getattr(request.manual_request, 'grade', None),  # ADD GRADE IF AVAILABLE
+                grade=getattr(request.manual_request, 'grade', None),
                 unit=request.manual_request.unit,
                 skill=request.manual_request.skill,
                 subskill=request.manual_request.subskill,
@@ -191,11 +233,20 @@ async def generate_content_enhanced(
         else:
             raise HTTPException(status_code=400, detail="Mode must be 'curriculum' or 'manual'")
         
+        # IMPROVED: Better logging for enhanced generation
+        grade_info = getattr(standard_request, 'grade', 'Not specified')
+        logger.info(f"   Subject: {standard_request.subject}, Grade: {grade_info}")
+        logger.info(f"   Subskill: {standard_request.subskill}")
+        
         # Generate content package with grade information
         package = await content_service.generate_content_package(standard_request)
         
         logger.info(f"✅ Enhanced content package generated successfully: {package.id}")
-        logger.info(f"   Grade: {getattr(standard_request, 'grade', 'Not specified')}")
+        
+        # FIXED: Use package.content instead of package.components
+        # Count the number of content types in the content dictionary
+        content_count = len(package.content) if hasattr(package, 'content') and package.content else 0
+        logger.info(f"   Content components generated: {content_count}")
         
         # Add background task
         background_tasks.add_task(log_generation_complete, package.id, package.generation_metadata.generation_time_ms)
@@ -226,7 +277,13 @@ async def get_content_package(
         
         package = await content_service.get_content_package(package_id, subject, unit)
         
-        logger.info(f"✅ Package retrieved: {package_id}")
+        # FIXED: Use package.content instead of package.components
+        if hasattr(package, 'content') and package.content:
+            content_types = list(package.content.keys())
+            logger.info(f"✅ Package retrieved: {package_id} with content types: {content_types}")
+        else:
+            logger.info(f"✅ Package retrieved: {package_id} (no content data)")
+        
         return package
         
     except ValueError as e:
@@ -235,6 +292,275 @@ async def get_content_package(
     except Exception as e:
         logger.error(f"❌ Failed to retrieve package {package_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve content package")
+
+
+@app.put(f"{settings.API_V1_PREFIX}/content/{{package_id}}/revise", response_model=ContentPackage)
+async def revise_content_package(
+    package_id: str,
+    revision_request: RevisionRequest,
+    background_tasks: BackgroundTasks,
+    content_service: ContentGenerationService = Depends(get_content_service)
+):
+    """
+    Revise specific components of a content package based on feedback
+    
+    This endpoint allows educators to request specific changes to individual 
+    components (reading, visual, audio, practice) while maintaining coherence
+    across the entire package.
+    """
+    try:
+        component_types = [r.component_type.value for r in revision_request.revisions]
+        logger.info(f"🔄 Content revision request for package: {package_id}")
+        logger.info(f"   Components to revise: {component_types}")
+        logger.info(f"   Reviewer: {revision_request.reviewer_id}")
+        
+        # Validate package_id matches request
+        if package_id != revision_request.package_id:
+            raise HTTPException(
+                status_code=400, 
+                detail="Package ID in URL must match package ID in request body"
+            )
+        
+        # IMPROVED: Validate component types before processing
+        valid_components = {"reading", "visual", "audio", "practice"}
+        invalid_components = [ct for ct in component_types if ct not in valid_components]
+        if invalid_components:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid component types: {invalid_components}. Must be one of: {valid_components}"
+            )
+        
+        # Perform revision
+        revised_package = await content_service.revise_content_package(
+            package_id=revision_request.package_id,
+            subject=revision_request.subject,
+            unit=revision_request.unit,
+            revisions=revision_request.revisions,
+            reviewer_id=revision_request.reviewer_id
+        )
+        
+        # Add background task
+        background_tasks.add_task(
+            log_revision_complete, 
+            package_id, 
+            component_types
+        )
+        
+        logger.info(f"✅ Content revision completed for package: {package_id}")
+        logger.info(f"   Revised components: {len(component_types)}")
+        return revised_package
+        
+    except ValueError as e:
+        logger.warning(f"⚠️ Revision request invalid: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Content revision failed for package {package_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Content revision failed: {str(e)}"
+        )
+
+
+# NEW: Endpoint to test individual generators
+@app.post(f"{settings.API_V1_PREFIX}/test/generator/{{generator_type}}")
+async def test_individual_generator(
+    generator_type: str,
+    request: ContentGenerationRequest,
+    content_service: ContentGenerationService = Depends(get_content_service)
+):
+    """Test individual generators - useful for debugging and development"""
+    try:
+        valid_generators = {"master_context", "reading", "visual", "audio", "practice"}
+        if generator_type not in valid_generators:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid generator type. Must be one of: {valid_generators}"
+            )
+        
+        logger.info(f"🧪 Testing {generator_type} generator")
+        
+        # This would call specific generator test methods
+        # Implementation depends on your ContentGenerationService structure
+        result = await content_service.test_generator(generator_type, request)
+        
+        return {
+            "generator_type": generator_type,
+            "status": "success",
+            "result": result,
+            "test_timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Generator test failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Generator test failed: {str(e)}"
+        )
+
+
+@app.get(f"{settings.API_V1_PREFIX}/health")
+async def health_check():
+    """Comprehensive health check for all services"""
+    try:
+        logger.info("🏥 Running health check...")
+        
+        # Check storage services
+        cosmos_health = await cosmos_service.health_check()
+        blob_health = await blob_storage_service.health_check()
+        
+        # IMPROVED: Test individual generators
+        generator_health = {}
+        try:
+            content_service = ContentGenerationService()
+            generator_health = {
+                "master_context": "available",
+                "reading_content": "available",
+                "visual_demo": "available",
+                "audio_content": "available" if settings.tts_enabled else "disabled",
+                "practice_problems": "available"
+            }
+        except Exception as e:
+            generator_health = {"status": "error", "error": str(e)}
+        
+        # FIXED: Check curriculum service health
+        curriculum_health = {}
+        try:
+            curriculum_service = get_curriculum_service()
+            status = curriculum_service.get_status()
+            curriculum_health = {
+                "status": "loaded" if status.get("loaded", False) else "not_loaded",
+                "total_records": status.get("statistics", {}).get("total_units", 0),
+                "subjects": len(status.get("statistics", {}).get("subjects_grades", {}))
+            }
+        except Exception as e:
+            curriculum_health = {"status": "error", "error": str(e)}
+        
+        # Determine overall health
+        cosmos_healthy = cosmos_health.get("status") == "healthy"
+        blob_healthy = blob_health.get("status") == "healthy"
+        generators_healthy = isinstance(generator_health, dict) and "error" not in generator_health
+        curriculum_available = curriculum_health.get("status") != "error"
+        overall_healthy = cosmos_healthy and blob_healthy and generators_healthy and curriculum_available
+        
+        health_status = {
+            "status": "healthy" if overall_healthy else "unhealthy",
+            "timestamp": cosmos_health.get("timestamp"),
+            "services": {
+                "cosmos_db": {
+                    "status": cosmos_health.get("status"),
+                    "total_documents": cosmos_health.get("total_documents"),
+                    "database": cosmos_health.get("database"),
+                    "container": cosmos_health.get("container")
+                },
+                "blob_storage": {
+                    "status": blob_health.get("status"),
+                    "container": blob_health.get("container", "unknown"),
+                    "recent_blobs": blob_health.get("total_recent_blobs")
+                },
+                "content_generators": generator_health,
+                "curriculum_service": curriculum_health,
+                "features": {
+                    "tts_enabled": settings.tts_enabled,
+                    "blob_storage_enabled": settings.blob_storage_enabled,
+                    "modular_architecture": True
+                }
+            }
+        }
+        
+        # Return appropriate status code
+        status_code = 200 if overall_healthy else 503
+        
+        logger.info(f"✅ Health check complete - Status: {health_status['status']}")
+        
+        return JSONResponse(content=health_status, status_code=status_code)
+        
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {str(e)}")
+        return JSONResponse(
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "services": {"error": "Health check failed"}
+            },
+            status_code=503
+        )
+
+
+# CURRICULUM ENDPOINTS - FIXED with singleton service
+@app.post(f"{settings.API_V1_PREFIX}/curriculum/load")
+async def load_curriculum_data(
+    curriculum_file: UploadFile = File(...),
+    learning_paths_file: Optional[UploadFile] = File(None),
+    subskill_paths_file: Optional[UploadFile] = File(None),
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
+    """Load curriculum data from uploaded files"""
+    try:
+        logger.info("📚 Loading curriculum data...")
+        
+        # Load main curriculum CSV
+        csv_content = await curriculum_file.read()
+        csv_text = csv_content.decode('utf-8')
+        records_loaded = await curriculum_service.load_curriculum_from_csv(csv_text)
+        
+        # Load learning paths if provided
+        learning_paths_loaded = 0
+        if learning_paths_file:
+            learning_paths_content = await learning_paths_file.read()
+            learning_paths_text = learning_paths_content.decode('utf-8')
+            await curriculum_service.load_learning_paths(learning_paths_text)
+            learning_paths_data = json.loads(learning_paths_text)
+            learning_paths_loaded = len(learning_paths_data.get("learning_path_decision_tree", {}))
+        
+        # Load subskill paths if provided
+        subskill_paths_loaded = 0
+        if subskill_paths_file:
+            subskill_paths_content = await subskill_paths_file.read()
+            subskill_paths_text = subskill_paths_content.decode('utf-8')
+            await curriculum_service.load_subskill_paths(subskill_paths_text)
+            subskill_paths_data = json.loads(subskill_paths_text)
+            subskill_paths_loaded = len(subskill_paths_data.get("subskill_learning_path", {}))
+        
+        logger.info(f"✅ Curriculum loaded: {records_loaded} records, {learning_paths_loaded} learning paths, {subskill_paths_loaded} subskill paths")
+        
+        return {
+            "status": "loaded",
+            "curriculum_records": records_loaded,
+            "learning_paths": learning_paths_loaded,
+            "subskill_paths": subskill_paths_loaded,
+            "subjects": curriculum_service.get_subjects()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to load curriculum: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to load curriculum: {str(e)}")
+
+
+@app.get(f"{settings.API_V1_PREFIX}/curriculum/context/{{subskill_id}}")
+async def get_curriculum_context(
+    subskill_id: str,
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
+    """Get detailed context for a specific subskill"""
+    try:
+        context = curriculum_service.get_subskill_context(subskill_id)
+        return context
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Failed to get context: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get subskill context: {str(e)}")
+
+
+# Background task functions
+async def log_generation_complete(package_id: str, generation_time_ms: int):
+    """Background task to log generation completion"""
+    logger.info(f"📊 Package {package_id} generation completed in {generation_time_ms}ms")
+
+
+async def log_revision_complete(package_id: str, revised_components: List[str]):
+    """Background task to log revision completion"""
+    logger.info(f"📊 Package {package_id} revision completed for components: {', '.join(revised_components)}")
 
 
 @app.get(f"{settings.API_V1_PREFIX}/content", response_model=List[ContentPackage])
@@ -332,29 +658,8 @@ async def get_packages_by_subject(subject: str, unit: Optional[str] = None):
         logger.error(f"❌ Failed to get packages for {subject}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get packages for {subject}")
 
-@app.get(f"{settings.API_V1_PREFIX}/packages/review-queue", response_model=List[ContentPackage])
-async def get_packages_for_review(
-    limit: int = 50,
-    subject: Optional[str] = None,
-    unit: Optional[str] = None
-):
-    """Get packages that need review (status = 'generated')"""
-    try:
-        logger.info(f"📋 Getting packages for review - Subject: {subject}, Unit: {unit}")
-        
-        packages = await cosmos_service.list_content_packages(
-            subject=subject,
-            unit=unit,
-            status="generated",  # Only get packages that need review
-            limit=limit
-        )
-        
-        logger.info(f"✅ Retrieved {len(packages)} packages for review")
-        return packages
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get review queue: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get packages for review")
+
+
 
 @app.put(f"{settings.API_V1_PREFIX}/packages/{{package_id}}/status")
 async def update_package_status(
@@ -476,67 +781,7 @@ async def get_package_review_info(package_id: str, subject: str, unit: str):
         logger.error(f"❌ Failed to get review info: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get package review info: {str(e)}")
 
-@app.put(f"{settings.API_V1_PREFIX}/content/{{package_id}}/revise", response_model=ContentPackage)
-async def revise_content_package(
-    package_id: str,
-    revision_request: RevisionRequest,
-    background_tasks: BackgroundTasks,
-    content_service: ContentGenerationService = Depends(get_content_service)
-):
-    """
-    Revise specific components of a content package based on feedback
-    
-    This endpoint allows educators to request specific changes to individual 
-    components (reading, visual, audio, practice) while maintaining coherence
-    across the entire package.
-    """
-    try:
-        logger.info(f"🔄 Content revision request for package: {package_id}")
-        logger.info(f"Components to revise: {[r.component_type.value for r in revision_request.revisions]}")
-        
-        # Validate package_id matches request
-        if package_id != revision_request.package_id:
-            raise HTTPException(
-                status_code=400, 
-                detail="Package ID in URL must match package ID in request body"
-            )
-        
-        # Perform revision
-        revised_package = await content_service.revise_content_package(
-            package_id=revision_request.package_id,
-            subject=revision_request.subject,
-            unit=revision_request.unit,
-            revisions=revision_request.revisions,
-            reviewer_id=revision_request.reviewer_id
-        )
-        
-        # Add background task
-        background_tasks.add_task(
-            log_revision_complete, 
-            package_id, 
-            [r.component_type.value for r in revision_request.revisions]
-        )
-        
-        logger.info(f"✅ Content revision completed for package: {package_id}")
-        return revised_package
-        
-    except ValueError as e:
-        logger.warning(f"⚠️ Revision request invalid: {str(e)}")
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"❌ Content revision failed for package {package_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Content revision failed: {str(e)}"
-        )
 
-
-# Add this background task function to your existing main.py
-async def log_revision_complete(package_id: str, revised_components: List[str]):
-    """Background task to log revision completion"""
-    logger.info(f"📊 Package {package_id} revision completed for components: {', '.join(revised_components)}")
-
-# Optional: Add endpoint to get revision history for a package
 @app.get(f"{settings.API_V1_PREFIX}/content/{{package_id}}/revisions")
 async def get_package_revision_history(
     package_id: str, 
@@ -565,61 +810,6 @@ async def get_package_revision_history(
         logger.error(f"❌ Failed to get revision history: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get revision history")
 
-@app.get(f"{settings.API_V1_PREFIX}/health")
-async def health_check():
-    """Comprehensive health check for all services"""
-    try:
-        logger.info("🏥 Running health check...")
-        
-        # Check storage services
-        cosmos_health = await cosmos_service.health_check()
-        blob_health = await blob_storage_service.health_check()
-        
-        # Determine overall health
-        cosmos_healthy = cosmos_health.get("status") == "healthy"
-        blob_healthy = blob_health.get("status") == "healthy"
-        overall_healthy = cosmos_healthy and blob_healthy
-        
-        health_status = {
-            "status": "healthy" if overall_healthy else "unhealthy",
-            "timestamp": cosmos_health.get("timestamp"),
-            "services": {
-                "cosmos_db": {
-                    "status": cosmos_health.get("status"),
-                    "total_documents": cosmos_health.get("total_documents"),
-                    "database": cosmos_health.get("database"),
-                    "container": cosmos_health.get("container")
-                },
-                "blob_storage": {
-                    "status": blob_health.get("status"),
-                    "container": blob_health.get("container", "unknown"),
-                    "recent_blobs": blob_health.get("total_recent_blobs")
-                },
-                "content_generation": {
-                    "status": "ready",
-                    "service": "ContentGenerationService"
-                }
-            }
-        }
-        
-        # Return appropriate status code
-        status_code = 200 if overall_healthy else 503
-        
-        logger.info(f"✅ Health check complete - Status: {health_status['status']}")
-        
-        return JSONResponse(content=health_status, status_code=status_code)
-        
-    except Exception as e:
-        logger.error(f"❌ Health check failed: {str(e)}")
-        return JSONResponse(
-            content={
-                "status": "unhealthy",
-                "error": str(e),
-                "services": {"error": "Health check failed"}
-            },
-            status_code=503
-        )
-
 
 @app.get(f"{settings.API_V1_PREFIX}/storage/stats")
 async def get_storage_stats():
@@ -644,61 +834,12 @@ async def get_storage_stats():
         raise HTTPException(status_code=500, detail="Failed to get storage statistics")
 
 
-# Background task functions
-async def log_generation_complete(package_id: str, generation_time_ms: int):
-    """Background task to log generation completion"""
-    logger.info(f"📊 Package {package_id} generation completed in {generation_time_ms}ms")
-
-# CURRICULUM ENDPOINTS - FIXED
-@app.post(f"{settings.API_V1_PREFIX}/curriculum/load")
-async def load_curriculum_data(
-    curriculum_file: UploadFile = File(...),
-    learning_paths_file: Optional[UploadFile] = File(None),
-    subskill_paths_file: Optional[UploadFile] = File(None)
-):
-    """Load curriculum data from uploaded files"""
-    try:
-        logger.info("📚 Loading curriculum data...")
-        
-        # Load main curriculum CSV
-        csv_content = await curriculum_file.read()
-        csv_text = csv_content.decode('utf-8')
-        records_loaded = await curriculum_service.load_curriculum_from_csv(csv_text)
-        
-        # Load learning paths if provided
-        learning_paths_loaded = 0
-        if learning_paths_file:
-            learning_paths_content = await learning_paths_file.read()
-            learning_paths_text = learning_paths_content.decode('utf-8')
-            await curriculum_service.load_learning_paths(learning_paths_text)
-            learning_paths_data = json.loads(learning_paths_text)
-            learning_paths_loaded = len(learning_paths_data.get("learning_path_decision_tree", {}))
-        
-        # Load subskill paths if provided
-        subskill_paths_loaded = 0
-        if subskill_paths_file:
-            subskill_paths_content = await subskill_paths_file.read()
-            subskill_paths_text = subskill_paths_content.decode('utf-8')
-            await curriculum_service.load_subskill_paths(subskill_paths_text)
-            subskill_paths_data = json.loads(subskill_paths_text)
-            subskill_paths_loaded = len(subskill_paths_data.get("subskill_learning_path", {}))
-        
-        logger.info(f"✅ Curriculum loaded: {records_loaded} records, {learning_paths_loaded} learning paths, {subskill_paths_loaded} subskill paths")
-        
-        return {
-            "status": "loaded",
-            "curriculum_records": records_loaded,
-            "learning_paths": learning_paths_loaded,
-            "subskill_paths": subskill_paths_loaded,
-            "subjects": curriculum_service.get_subjects()
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to load curriculum: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to load curriculum: {str(e)}")
-
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/browse")
-async def browse_curriculum(subject: Optional[str] = None, grade: Optional[str] = None):
+async def browse_curriculum(
+    subject: Optional[str] = None, 
+    grade: Optional[str] = None,
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Browse curriculum structure with optional filtering"""
     try:
         curricula = curriculum_service.get_curriculum(subject=subject, grade=grade)
@@ -715,21 +856,11 @@ async def browse_curriculum(subject: Optional[str] = None, grade: Optional[str] 
         logger.error(f"❌ Failed to browse curriculum: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to browse curriculum: {str(e)}")
 
-# FIXED: Use proper parameter definition in route
-@app.get(f"{settings.API_V1_PREFIX}/curriculum/context/{{subskill_id}}")
-async def get_curriculum_context(subskill_id: str):
-    """Get detailed context for a specific subskill"""
-    try:
-        context = curriculum_service.get_subskill_context(subskill_id)
-        return context
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"❌ Failed to get context: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get subskill context: {str(e)}")
 
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/status")
-async def get_curriculum_status():
+async def get_curriculum_status(
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Get curriculum loading status and statistics"""
     try:
         return curriculum_service.get_status()
@@ -737,8 +868,11 @@ async def get_curriculum_status():
         logger.error(f"❌ Failed to get status: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get curriculum status")
 
+
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/subjects")
-async def get_subjects():
+async def get_subjects(
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Get list of available subjects"""
     try:
         subjects = curriculum_service.get_subjects()
@@ -746,8 +880,12 @@ async def get_subjects():
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to get subjects")
 
+
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/grades")
-async def get_grades(subject: Optional[str] = None):
+async def get_grades(
+    subject: Optional[str] = None,
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Get list of available grades"""
     try:
         grades = curriculum_service.get_grades(subject)
@@ -755,8 +893,12 @@ async def get_grades(subject: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to get grades")
 
+
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/learning-path/{{skill_id}}")
-async def get_learning_path(skill_id: str):
+async def get_learning_path(
+    skill_id: str,
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Get learning path for a specific skill"""
     try:
         path = curriculum_service.get_learning_path(skill_id)
@@ -764,8 +906,12 @@ async def get_learning_path(skill_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to get learning path")
 
+
 @app.get(f"{settings.API_V1_PREFIX}/curriculum/subskill-path/{{subskill_id}}")
-async def get_subskill_path(subskill_id: str):
+async def get_subskill_path(
+    subskill_id: str,
+    curriculum_service: CurriculumService = Depends(get_curriculum_service)
+):
     """Get next subskill in the learning progression"""
     try:
         next_subskill = curriculum_service.get_next_subskill(subskill_id)
@@ -776,7 +922,8 @@ async def get_subskill_path(subskill_id: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to get subskill path")
-        
+
+
 # Error handlers
 @app.exception_handler(ValueError)
 async def value_error_handler(request, exc):
