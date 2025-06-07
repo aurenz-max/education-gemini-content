@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     GENERATION_TIMEOUT: int = 300
     
     # Audio Configuration
-    ENABLE_TTS: bool = True  # NEW: Toggle for text-to-speech generation
+    ENABLE_TTS: bool = False  # NEW: Toggle for text-to-speech generation
     AUDIO_STORAGE_PATH: str = "generated_audio"  # Local path for temp storage
     AUDIO_FORMAT: str = "wav"
     DEFAULT_TEACHER_VOICE: str = "Zephyr"

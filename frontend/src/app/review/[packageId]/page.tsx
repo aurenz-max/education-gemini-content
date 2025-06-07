@@ -1,4 +1,4 @@
-// src/app/review/[packageId]/page.tsx - Clean, Less Busy Design
+// src/app/review/[packageId]/page.tsx - Updated for Enhanced Visual Demo Panel
 'use client';
 
 import { useState, useEffect, use } from 'react';
@@ -29,7 +29,7 @@ import {
 
 // Import updated panels with revision support
 import { ReadingContentPanel } from '@/components/review/ReadingContentPanel';
-import { VisualDemoPanel } from '@/components/review/VisualDemoPanel';
+import { VisualDemoPanel } from '@/components/review/VisualDemoPanel'; // This will use your enhanced component
 import { AudioContentPanel } from '@/components/review/AudioContentPanel';
 import { PracticeProblemsPanel } from '@/components/review/PracticeProblemsPanel';
 import { ReviewActions } from '@/components/review/ReviewActions';
@@ -166,6 +166,47 @@ export default function ReviewPage({ params }: ReviewPageProps) {
     } finally {
       setIsSubmittingRevision(false);
       setRevisionComponent(null);
+    }
+  };
+
+  // NEW: Package save handler
+  const handleSavePackage = async () => {
+    if (!package_) return;
+
+    try {
+      // Update package status to indicate it's been saved for review
+      await contentAPI.updatePackageStatus(
+        packageId,
+        subject,
+        unit,
+        {
+          status: 'under_review',
+          reviewer_id: reviewerId,
+          notes: 'Package saved and marked for review'
+        }
+      );
+      
+      setCurrentStatus('under_review');
+      alert('Package saved successfully!');
+      
+    } catch (err) {
+      console.error('❌ Failed to save package:', err);
+      throw new Error(err instanceof Error ? err.message : 'Failed to save package');
+    }
+  };
+
+  // NEW: Package approval handler
+  const handleApprovePackage = async () => {
+    if (!package_) return;
+
+    try {
+      await contentAPI.approvePackage(packageId, subject, unit, reviewerId, 'Package approved for publication');
+      setCurrentStatus('approved');
+      alert('Package approved successfully!');
+      
+    } catch (err) {
+      console.error('❌ Failed to approve package:', err);
+      throw new Error(err instanceof Error ? err.message : 'Failed to approve package');
     }
   };
 
@@ -351,6 +392,9 @@ export default function ReviewPage({ params }: ReviewPageProps) {
                   handleRevisionRequest('visual', feedback, priority)
                 }
                 isSubmittingRevision={isSubmittingRevision && revisionComponent === 'visual'}
+                onSavePackage={handleSavePackage}
+                onApprovePackage={handleApprovePackage}
+                packageStatus={currentStatus as any}
               />
             )}
 

@@ -106,7 +106,7 @@ class VisualDemoGenerator(BaseContentGenerator):
         
         try:
             response = await self.client.aio.models.generate_content(
-                model='gemini-2.5-flash-preview-05-20',
+                model='gemini-2.5-pro-preview-06-05',
                 contents=prompt,
                 config=GenerateContentConfig(
                     temperature=0.5,
@@ -257,7 +257,7 @@ class VisualDemoGenerator(BaseContentGenerator):
         
         try:
             response = await self.client.aio.models.generate_content(
-                model='gemini-2.5-flash-preview-05-20',
+                model='gemini-2.5-pro-preview-06-05',
                 contents=prompt,
                 config=GenerateContentConfig(
                     response_mime_type='application/json',

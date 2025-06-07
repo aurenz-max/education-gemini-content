@@ -28,12 +28,9 @@ interface EnhancedContentGenerationFormProps {
 const SUBJECTS = [
   'Mathematics',
   'Science',
-  'English Language Arts',
+  'Language Arts',
   'Social Studies',
-  'Computer Science',
   'Art',
-  'Music',
-  'Physical Education'
 ];
 
 const COMMON_PREREQUISITES = [

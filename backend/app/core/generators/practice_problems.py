@@ -41,8 +41,7 @@ class PracticeProblemsGenerator(BaseContentGenerator):
         Learning Objectives: {', '.join(master_context.learning_objectives)}
 
         Content Integration:
-        Reading covered: {', '.join(reading_concepts)}
-        Visual demo includes: {', '.join(visual_elements)}
+        Reading covered: {', '.join(reading_concepts)}        
 
         Generate 8-10 problems that:
         1. Test understanding of key terms using {grade_info} appropriate language
